@@ -46,6 +46,7 @@ By default boards use the `jlink` runner. Alternative runners can be used with
 Supported boards:
 
 - `asterix`
+- `cyberdeck_evt3`
 
 ## Usage
 

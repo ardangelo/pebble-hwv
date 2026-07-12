@@ -1,0 +1,10 @@
+identifier: cyberdeck_evt3
+name: COREDEVICES-CYBERDECK-EVT3
+type: mcu
+arch: arm
+toolchain:
+  - zephyr
+ram: 256
+flash: 1024
+supported: []
+vendor: coredevices

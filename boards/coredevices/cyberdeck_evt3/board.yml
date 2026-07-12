@@ -1,0 +1,5 @@
+boards:
+- name: cyberdeck_evt3
+  vendor: coredevices
+  socs:
+    - name: nrf52840

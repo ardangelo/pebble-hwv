@@ -10,7 +10,7 @@
 #include "mic.h"
 #include "press.h"
 
-#ifdef CONFIG_BOARD_ASTERIX
+#if defined(CONFIG_BOARD_ASTERIX) || defined(CONFIG_BOARD_CYBERDECK_EVT3)
 #include "lfxo.h"
 #endif
 
@@ -85,7 +85,7 @@ int main(void)
 		printf("Failed to initialize speaker module (%d)\n", ret);
 	}
 
-#ifdef CONFIG_BOARD_ASTERIX
+#if defined(CONFIG_BOARD_ASTERIX) || defined(CONFIG_BOARD_CYBERDECK_EVT3)
 	ret = lfxo_init();
 	if (ret < 0) {
 		printf("Failed to initialize LFXO module (%d)\n", ret);

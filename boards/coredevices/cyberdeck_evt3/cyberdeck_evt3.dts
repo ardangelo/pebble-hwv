@@ -1,0 +1,7 @@
+/* Cyberdeck EVT3 initially uses the Asterix hardware description unchanged. */
+#include "../asterix/asterix.dts"
+
+/ {
+	model = "Core Devices Cyberdeck EVT3";
+	compatible = "coredevices,cyberdeck-evt3";
+};
