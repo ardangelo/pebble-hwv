@@ -1,0 +1,19 @@
+description: 83_OFN optical navigation controller
+
+compatible: "coredevices,ofn83"
+
+include: i2c-device.yaml
+
+properties:
+  int-gpios:
+    type: phandle-array
+    required: true
+    description: Active-low motion interrupt
+  reset-gpios:
+    type: phandle-array
+    required: true
+    description: Active-low reset
+  shutdown-gpios:
+    type: phandle-array
+    required: true
+    description: Active-high shutdown

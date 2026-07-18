@@ -5,5 +5,6 @@ menuconfig DISPLAY_EXTERNAL
 if DISPLAY_EXTERNAL
 
 rsource "Kconfig.ls013b7dh05"
+rsource "Kconfig.ls013b7dh01"
 
 endif # DISPLAY_EXTERNAL

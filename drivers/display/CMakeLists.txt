@@ -1,2 +1,3 @@
 zephyr_library_amend()
 zephyr_library_sources_ifdef(CONFIG_DISPLAY_LS013B7DH05 display_ls013b7dh05.c)
+zephyr_library_sources_ifdef(CONFIG_DISPLAY_LS013B7DH01 display_ls013b7dh01.c)

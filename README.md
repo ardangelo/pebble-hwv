@@ -23,14 +23,14 @@ west update
 
 ### Building and running
 
-To build the application, run the following command:
+To build the application, run:
 
 ```shell
 cd pebble-hwv
 west build -b $BOARD_TARGET app
 ```
 
-where `$BOARD_TARGET` is the board target, e.g. `asterix`.
+`$BOARD_TARGET` can be `asterix` or `cyberdeck_evt3`. Cyberdeck developers may also use `just configure && just build`; the `Justfile` supplies the repository's GNU Arm toolchain settings.
 
 Once you have built the application, run the following command to flash it:
 
@@ -50,11 +50,29 @@ Supported boards:
 
 ## Usage
 
-Connect `UART_TX` and `UART_RX` to a host, using e.g. a USB-UART converter.
-Open a serial console using `115200@8N1` settings. Once the device is powered
-up, either via `VBUS` or `VBAT`, you should observe a boot banner and
-immediately after a shell prompt: `uart:~$`. Below you have a short guide of
-available commands.
+Asterix uses its configured UART console at 115200 8N1. Cyberdeck EVT3 exposes the shell as USB CDC through the on-board hub; the host should enumerate `Cyberdeck EVT3 HWV` and show a prompt on its CDC ACM port.
+
+### Cyberdeck EVT3
+
+Cyberdeck commands are nRF-only and target the Q20 + 83_OFN assembly.
+
+| Command | Description |
+| --- | --- |
+| `hwv cyberdeck probe` | Probe DRV2604, OPT3001, DA7212, LSM6DSO, TCA8418, and OFN83 with fixture-readable PASS/FAIL lines |
+| `hwv cyberdeck status` | Summarize nRF control GPIOs and core device readiness; battery ADC is explicitly skipped |
+| `hwv cyberdeck power on\|off\|cycle` | Control `NRF_PERIPH_PW_EN`; `cycle` reinitializes TCA8418 and OFN83 |
+| `hwv cyberdeck rgb red\|green\|blue\|white\|off` | Verify WS2812 color order on P0.16 |
+| `hwv cyberdeck backlight $VAL` | Set Q20 keyboard backlight to `$VAL: 0-100` (capped at the firmware-defined 67% duty cycle) |
+| `hwv cyberdeck ec [$SECS]` | Require an EC/end-key press and release |
+| `hwv cyberdeck keyboard status` | Read TCA8418 interrupt/configuration/FIFO status |
+| `hwv cyberdeck keyboard check [$SECS]` | Require press and release events for every key in the current Q20 matrix map |
+| `hwv cyberdeck ofn id` | Require 83_OFN product ID `0x30`; A320 is rejected |
+| `hwv cyberdeck ofn motion [$SECS]` | Require OFN movement in positive and negative X/Y directions |
+| `hwv cyberdeck fixture` | Print guided TP4054, rail, switchover, SWD, and USB checks |
+| `hwv cyberdeck usb $TOKEN` | Echo a fixture token over USB CDC to prove shell RX/TX |
+| `hwv cyberdeck reset` | Cold-reset the nRF; require a fresh HWV boot banner |
+
+The W25Q256JW contents are disposable in Cyberdeck HWV. `erase_all`, flash stress, and microphone diagnostics may destroy the entire external flash. Battery ADC remains unimplemented because the authoritative EVT3 firmware board definition does not yet provide an SAADC assignment.
 
 ### BLE
 
@@ -63,17 +81,15 @@ available commands.
 | `hwv ble on` | Turn ON BLE and advertising as `Pebble HWV` |
 | `hwv ble off` | Turn OFF BLE |
 
-You can use any utility to test connection and writing to the exposed GATT
-characteristic (e.g. [LightBlue](https://punchthrough.com/lightblue/)). Note
-that after disconnecting the firmware will no longer advertise.
+You can use any utility to test connection and writing to the exposed GATT characteristic (e.g. [LightBlue](https://punchthrough.com/lightblue/)). Note that after disconnecting the firmware will no longer advertise.
 
-### Buttons
+### Buttons (Asterix only)
 
 | Command | Description |
 | --- | --- |
 | `hwv buttons check` | Check if buttons are pressed/release |
 
-### Charger
+### Charger (Asterix only)
 
 | Command | Description |
 | --- | --- |
@@ -90,6 +106,9 @@ To get meaningful status reports, you will need to plug the battery to `VBAT`,
 | `hwv display off` | Turn OFF the display |
 | `hwv display vpattern` | Draw a vertical pattern |
 | `hwv display hpattern` | Draw an horizontal pattern |
+| `hwv display white` / `black` | Draw full-panel solid patterns |
+| `hwv display checker` | Draw a checkerboard pattern |
+| `hwv display border` | Draw a border/addressing pattern |
 | `hwv display brightness $VAL` | Adjust display backlight brightness, `$VAL: 0-100` |
 
 ### Flash
@@ -98,6 +117,7 @@ To get meaningful status reports, you will need to plug the battery to `VBAT`,
 | --- | --- |
 | `hwv flash id` | Read flash chip JEDEC ID |
 | `hwv flash erase $ADDR` | Erase flash page for the given `$ADDR` |
+| `hwv flash erase_all` | Destructively erase the entire external flash |
 | `hwv flash read $ADDR $N` | Read `$N` bytes from address `$ADDR` |
 | `hwv flash write $ADDR $VAL` | Write `$VAL` (hex encoded, e.g. `aabbccdd`) to `$ADDR` |
 | `hwv flash stress $ITERS` | Perform flash stress test `$ITERS` times |
@@ -113,25 +133,26 @@ To get meaningful status reports, you will need to plug the battery to `VBAT`,
 | Command | Description |
 | --- | --- |
 | `hwv imu get` | Obtain IMU readings (acc/gyro) |
+| `hwv imu interrupt [$SECS]` | Wait for an LSM6DSO INT1 data-ready event |
 | `hwv light get` | Obtain ALS readings |
-| `hwv mag get` | Obtain magnetometer readings |
-| `hwv press get` | Obtain pressure sensor readings |
+| `hwv mag get` | Obtain magnetometer readings (Asterix only) |
+| `hwv press get` | Obtain pressure sensor readings (Asterix only) |
 
 ### Speaker
 
 | Command | Description |
 | --- | --- |
 | `hwv speaker play` | Play sound on speaker |
+| `hwv speaker headphone` | Play a tone on both DA7212 headphone channels (Cyberdeck) |
+| `hwv speaker codec` | Read DA7212 identification/status registers (Cyberdeck) |
 
 ### Microphone
 
 | Command | Description |
 | --- | --- |
-| `hwv mic capture [$SECS]` | Capture microphone data (`$SECS` optional capture seconds) |
+| `hwv mic capture [$ARG]` | Asterix: capture optional seconds to flash; Cyberdeck: capture optional 16-ms I2S blocks and report min/max/DC/span |
 
-To verify that captured data makes sense, it is recommended to use a tone
-generator (find one in any App store) and capture the data using the
-`scripts/wavgen.py` tool, like this:
+For Asterix PDM captures, use a tone generator and `scripts/wavgen.py` to verify the emitted sample stream:
 
 ```shell
 python scripts/wavgen.py -p /dev/$PORT -o test.wav [-s $SECS]
@@ -140,7 +161,7 @@ python scripts/wavgen.py -p /dev/$PORT -o test.wav [-s $SECS]
 Then listen the generated WAV file in loop mode using any audio player. You
 should hear the same tone you generated.
 
-### LFXO accuracy (Asterix only)
+### LFXO accuracy
 
 | Command | Description |
 | --- | --- |

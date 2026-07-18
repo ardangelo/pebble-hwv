@@ -1,4 +1,10 @@
+#ifndef DT_DRV_COMPAT
 #define DT_DRV_COMPAT sharp_ls013b7dh05
+#endif
+
+#ifndef LS013B7DH0X_LOG_MODULE
+#define LS013B7DH0X_LOG_MODULE ls013b7dh05
+#endif
 
 #include <zephyr/drivers/display.h>
 #include <zephyr/drivers/gpio.h>
@@ -7,7 +13,7 @@
 #include <zephyr/drivers/spi.h>
 #include <zephyr/logging/log.h>
 
-LOG_MODULE_REGISTER(ls013b7dh05, CONFIG_DISPLAY_LOG_LEVEL);
+LOG_MODULE_REGISTER(LS013B7DH0X_LOG_MODULE, CONFIG_DISPLAY_LOG_LEVEL);
 
 #define LS013B7DH05_WRITE BIT(0)
 
@@ -16,11 +22,12 @@ struct ls013b7dh05_config {
 	struct pwm_dt_spec extcomin;
 	struct gpio_dt_spec disp;
 	const struct device *backlight;
-	uint8_t width;
-	uint8_t height;
+	uint16_t width;
+	uint16_t height;
 	uint8_t line_width;
 	uint8_t *fb;
 	uint32_t fb_size;
+	bool initially_on;
 };
 
 static int ls013b7dh05_blanking_on(const struct device *dev)
@@ -181,7 +188,8 @@ static int ls013b7dh05_init(const struct device *dev)
 		return -ENODEV;
 	}
 
-	ret = gpio_pin_configure_dt(&config->disp, GPIO_OUTPUT_INACTIVE);
+	ret = gpio_pin_configure_dt(&config->disp,
+				    config->initially_on ? GPIO_OUTPUT_ACTIVE : GPIO_OUTPUT_INACTIVE);
 	if (ret < 0) {
 		LOG_ERR("Failed to configure DISP GPIO");
 		return ret;
@@ -226,6 +234,7 @@ static const struct display_driver_api ls013b7dh05_api = {
 		.disp = GPIO_DT_SPEC_INST_GET(n, disp_gpios),                                      \
 		.extcomin = PWM_DT_SPEC_INST_GET(n),                                               \
 		.backlight = DEVICE_DT_GET(DT_INST_PHANDLE(n, backlight)),                         \
+		.initially_on = DT_INST_PROP_OR(n, initially_on, 0),                                \
 		.width = DT_INST_PROP(n, width),                                                   \
 		.height = DT_INST_PROP(n, height),                                                 \
 		.line_width = DIV_ROUND_UP(DT_INST_PROP(n, width), 8U),                            \

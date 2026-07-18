@@ -1,0 +1,30 @@
+description: Sharp LS013B7DH01 400x240 memory LCD module
+
+compatible: "sharp,ls013b7dh01"
+
+include: ["display-controller.yaml", "spi-device.yaml"]
+
+properties:
+  disp-gpios:
+    type: phandle-array
+    required: true
+    description: Display ON/OFF GPIO
+
+  pwms:
+    type: phandle-array
+    required: true
+    description: Display EXTCOMIN PWM
+
+  pwm-names:
+    type: string-array
+    required: true
+    description: Display EXTCOMIN PWM names
+
+  backlight:
+    type: phandle
+    required: true
+    description: Backlight LED controller
+
+  initially-on:
+    type: boolean
+    description: Keep the shared display/peripheral enable asserted at initialization

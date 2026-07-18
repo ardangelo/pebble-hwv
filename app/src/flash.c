@@ -8,15 +8,18 @@
 #include <zephyr/shell/shell.h>
 
 #define FLASH_STRESS_TEST_SIZE 1024
+#define FLASH_NODE DT_ALIAS(flash0)
 
-static const struct device *const flash = DEVICE_DT_GET(DT_ALIAS(flash0));
+static const uint8_t expected_jedec_id[] = DT_PROP(FLASH_NODE, jedec_id);
+
+static const struct device *const flash = DEVICE_DT_GET(FLASH_NODE);
 static bool initialized;
 
 static uint32_t xorshift32(uint32_t seed)
 {
 	seed ^= seed << 13;
 	seed ^= seed >> 17;
-	seed ^= seed < 5;
+	seed ^= seed << 5;
 	return seed;
 }
 
@@ -46,6 +49,11 @@ static int cmd_flash_id(const struct shell *sh, size_t argc, char **argv)
 	}
 
 	shell_print(sh, "Flash ID: %02x %02x %02x", id[0], id[1], id[2]);
+	if (memcmp(id, expected_jedec_id, sizeof(id)) != 0) {
+		shell_error(sh, "Unexpected flash ID; expected %02x %02x %02x",
+			expected_jedec_id[0], expected_jedec_id[1], expected_jedec_id[2]);
+		ret = -ENODEV;
+	}
 
 end:
 	(void)pm_device_action_run(flash, PM_DEVICE_ACTION_SUSPEND);
@@ -95,6 +103,43 @@ end:
 	(void)pm_device_action_run(flash, PM_DEVICE_ACTION_SUSPEND);
 
 	return ret;
+}
+
+static int cmd_flash_erase_all(const struct shell *sh, size_t argc, char **argv)
+{
+	uint64_t flash_size;
+	int ret;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	if (!initialized) {
+		return -EPERM;
+	}
+
+	ret = flash_get_size(flash, &flash_size);
+	if (ret < 0) {
+		return ret;
+	}
+	if (flash_size > SIZE_MAX) {
+		return -EOVERFLOW;
+	}
+
+	ret = pm_device_action_run(flash, PM_DEVICE_ACTION_RESUME);
+	if (ret < 0) {
+		return ret;
+	}
+
+	shell_warn(sh, "Destructively erasing all %llu bytes", flash_size);
+	ret = flash_erase(flash, 0, (size_t)flash_size);
+	(void)pm_device_action_run(flash, PM_DEVICE_ACTION_SUSPEND);
+	if (ret < 0) {
+		shell_error(sh, "Whole-chip erase failed (%d)", ret);
+		return ret;
+	}
+
+	shell_print(sh, "Whole-chip erase passed");
+	return 0;
 }
 
 static int cmd_flash_read(const struct shell *sh, size_t argc, char **argv)
@@ -163,6 +208,10 @@ static int cmd_flash_write(const struct shell *sh, size_t argc, char **argv)
 
 	addr = strtoul(argv[1], NULL, 0);
 	data_len = strlen(argv[2]) / 2U;
+	if (data_len == 0U || (strlen(argv[2]) & 1U) != 0U) {
+		shell_error(sh, "Data must contain an even, nonzero number of hex digits");
+		return -EINVAL;
+	}
 
 	buf = k_malloc(data_len);
 	if (buf == NULL) {
@@ -279,10 +328,9 @@ static int cmd_flash_stress(const struct shell *sh, size_t argc, char **argv)
 		lfsr_cur = lfsr_seed;
 		for (unsigned int i = 0U; i < FLASH_STRESS_TEST_SIZE; i++) {
 			if (buf[i] != (uint8_t)lfsr_cur) {
-				shell_error(
-					sh,
-					"Miscompare at offset %u: expected 0x%02x, found 0x%02x", 0,
-					(uint8_t)lfsr_cur, buf[i]);
+				shell_error(sh,
+					    "Miscompare at offset %u: expected 0x%02x, found 0x%02x", i,
+					    (uint8_t)lfsr_cur, buf[i]);
 				ret = -EINVAL;
 				goto err_suspend;
 			}
@@ -304,6 +352,7 @@ err_free:
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	sub_flash_cmds, SHELL_CMD(id, NULL, "Read flash ID", cmd_flash_id),
 	SHELL_CMD_ARG(erase, NULL, "Erase page: erase PAGE_ADDR", cmd_flash_erase, 2, 0),
+	SHELL_CMD(erase_all, NULL, "Destructively erase the entire flash", cmd_flash_erase_all),
 	SHELL_CMD_ARG(read, NULL, "Read: read ADDR NUM_BYTES", cmd_flash_read, 3, 0),
 	SHELL_CMD_ARG(write, NULL, "Write: write ADDR DATA", cmd_flash_write, 3, 0),
 	SHELL_CMD_ARG(stress, NULL, "Stress: stress [ITERS]", cmd_flash_stress, 1, 1),

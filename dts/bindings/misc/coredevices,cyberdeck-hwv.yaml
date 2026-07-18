@@ -1,0 +1,14 @@
+description: Cyberdeck EVT3 nRF hardware-validation controls
+
+compatible: "coredevices,cyberdeck-hwv"
+
+properties:
+  peripheral-power-gpios:
+    type: phandle-array
+    required: true
+  lcd-select-gpios:
+    type: phandle-array
+    required: true
+  ec-key-gpios:
+    type: phandle-array
+    required: true

@@ -1,17 +1,20 @@
-#include "speaker.h"
-#include "buttons.h"
-#include "charger.h"
 #include "display.h"
 #include "flash.h"
 #include "haptic.h"
-#include "light.h"
 #include "imu.h"
+#include "lfxo.h"
+#include "light.h"
+#include "speaker.h"
+
+#if defined(CONFIG_BOARD_ASTERIX)
+#include "buttons.h"
+#include "charger.h"
 #include "mag.h"
 #include "mic.h"
 #include "press.h"
-
-#if defined(CONFIG_BOARD_ASTERIX) || defined(CONFIG_BOARD_CYBERDECK_EVT3)
-#include "lfxo.h"
+#elif defined(CONFIG_BOARD_CYBERDECK_EVT3)
+#include "cyberdeck.h"
+#include "mic_i2s.h"
 #endif
 
 #include <stdio.h>
@@ -24,73 +27,38 @@
 SHELL_SUBCMD_SET_CREATE(hwv_cmds, (hwv));
 SHELL_CMD_REGISTER(hwv, &hwv_cmds, "HWV commands", NULL);
 
+static void report_init(const char *name, int ret)
+{
+	if (ret < 0) {
+		printf("Failed to initialize %s module (%d)\n", name, ret);
+	}
+}
+
 int main(void)
 {
-	int ret;
+#if defined(CONFIG_BOARD_CYBERDECK_EVT3)
+	report_init("Cyberdeck", cyberdeck_init());
+#endif
 
 	printf("HWV v%s-%s\n", APP_VERSION_STRING, STRINGIFY(APP_BUILD_VERSION));
 
-	ret = buttons_init();
-	if (ret < 0) {
-		printf("Failed to initialize buttons module (%d)\n", ret);
-	}
-
-	ret = charger_init();
-	if (ret < 0) {
-		printf("Failed to initialize charger module (%d)\n", ret);
-	}
-
-	ret = display_init();
-	if (ret < 0) {
-		printf("Failed to initialize display module (%d)\n", ret);
-	}
-
-	ret = flash_init();
-	if (ret < 0) {
-		printf("Failed to initialize flash module (%d)\n", ret);
-	}
-
-	ret = haptic_init();
-	if (ret < 0) {
-		printf("Failed to initialize haptic module (%d)\n", ret);
-	}
-
-	ret = light_init();
-	if (ret < 0) {
-		printf("Failed to initialize light sensor module (%d)\n", ret);
-	}
-
-	ret = imu_init();
-	if (ret < 0) {
-		printf("Failed to initialize IMU module (%d)\n", ret);
-	}
-
-	ret = mag_init();
-	if (ret < 0) {
-		printf("Failed to initialize magnetometer module (%d)\n", ret);
-	}
-
-	ret = mic_init();
-	if (ret < 0) {
-		printf("Failed to initialize microphone module (%d)\n", ret);
-	}
-
-	ret = press_init();
-	if (ret < 0) {
-		printf("Failed to initialize pressure sensor module (%d)\n", ret);
-	}
-
-	ret = speaker_init();
-	if (ret < 0) {
-		printf("Failed to initialize speaker module (%d)\n", ret);
-	}
-
-#if defined(CONFIG_BOARD_ASTERIX) || defined(CONFIG_BOARD_CYBERDECK_EVT3)
-	ret = lfxo_init();
-	if (ret < 0) {
-		printf("Failed to initialize LFXO module (%d)\n", ret);
-	}
+#if defined(CONFIG_BOARD_ASTERIX)
+	report_init("buttons", buttons_init());
+	report_init("charger", charger_init());
+	report_init("magnetometer", mag_init());
+	report_init("microphone", mic_init());
+	report_init("pressure sensor", press_init());
+#elif defined(CONFIG_BOARD_CYBERDECK_EVT3)
+	report_init("I2S microphone", mic_i2s_init());
 #endif
+
+	report_init("display", display_init());
+	report_init("flash", flash_init());
+	report_init("haptic", haptic_init());
+	report_init("light sensor", light_init());
+	report_init("IMU", imu_init());
+	report_init("speaker", speaker_init());
+	report_init("LFXO", lfxo_init());
 
 	return 0;
 }

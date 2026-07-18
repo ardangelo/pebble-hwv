@@ -1,0 +1,10 @@
+config DISPLAY_LS013B7DH01
+	bool "Sharp LS013B7DH01 display"
+	depends on DT_HAS_SHARP_LS013B7DH01_ENABLED
+	select SPI
+	select GPIO
+	select LED
+	select PWM
+	default y
+	help
+	  Driver for the Sharp LS013B7DH01 400x240 memory LCD.

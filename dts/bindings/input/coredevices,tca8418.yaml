@@ -1,0 +1,11 @@
+description: Core Devices TCA8418 keyboard matrix controller
+
+compatible: "coredevices,tca8418"
+
+include: i2c-device.yaml
+
+properties:
+  int-gpios:
+    type: phandle-array
+    required: true
+    description: Active-low keyboard interrupt
