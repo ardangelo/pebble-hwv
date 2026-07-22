@@ -1,10 +1,13 @@
 #include "speaker.h"
+#include "cyberdeck_i2s_pins.h"
 
+#include <nrfx_i2s.h>
+#include <zephyr/device.h>
+#include <zephyr/drivers/clock_control/nrf_clock_control.h>
 #include <zephyr/drivers/i2c.h>
-#include <zephyr/drivers/i2s.h>
 #include <zephyr/kernel.h>
 #include <zephyr/shell/shell.h>
-#include <hal/nrf_i2s.h>
+#include <zephyr/sys/onoff.h>
 
 #define DA7212_PLL_STATUS          0x03
 #define DA7212_CIF_CTRL            0x1d
@@ -41,32 +44,70 @@
 #define DA7212_CP_DELAY            0x96
 #define DA7212_SYSTEM_ACTIVE       0xfd
 
-#define SAMPLE_RATE_HZ 16000U
-/* Zephyr's generic API cannot select a fixed MCK ratio, so apply the authoritative nrfx setup. */
-#define BLOCK_FRAMES   256U
-#define BLOCK_SIZE     (BLOCK_FRAMES * 2U * sizeof(int16_t))
-#define BLOCK_COUNT    4U
-#define PLAY_BLOCKS    32U
-#define I2S_TIMEOUT_MS 1000
+#define BLOCK_FRAMES     256U
+#define BLOCK_WORDS      BLOCK_FRAMES
+#define BUFFER_COUNT     2U
+#define PLAY_DURATION_MS 600
+#define STOP_TIMEOUT_MS  100
+#define HFXO_START_TIMEOUT_MS 100
 
 static const struct i2c_dt_spec codec = I2C_DT_SPEC_GET(DT_NODELABEL(da7212));
-static const struct device *const i2s = DEVICE_DT_GET(DT_NODELABEL(i2s0));
-K_MEM_SLAB_DEFINE_STATIC(speaker_slab, BLOCK_SIZE, BLOCK_COUNT, 4);
+static const struct device *const i2s_dev = DEVICE_DT_GET(DT_NODELABEL(i2s0));
+static const nrfx_i2s_t i2s_instance = NRFX_I2S_INSTANCE(0);
+static uint32_t speaker_buffers[BUFFER_COUNT][BLOCK_WORDS];
+static struct onoff_manager *hfclk_manager;
+static struct onoff_client hfclk_client;
+static bool hfclk_requested;
+static bool i2s_initialized;
+static bool i2s_started;
+static volatile bool speaker_running;
+static volatile int speaker_stream_error;
+static uint8_t next_buffer;
+static unsigned int tone_block;
 static bool initialized;
+K_SEM_DEFINE(speaker_transfer_stopped, 0, 1);
 
-static void apply_authoritative_i2s_clock(void)
+static int hfclk_request(void)
 {
-	const nrf_i2s_config_t config = {
-		.mode = NRF_I2S_MODE_SLAVE,
-		.format = NRF_I2S_FORMAT_I2S,
-		.alignment = NRF_I2S_ALIGN_LEFT,
-		.sample_width = NRF_I2S_SWIDTH_16BIT,
-		.channels = NRF_I2S_CHANNELS_STEREO,
-		.mck_setup = NRF_I2S_MCK_32MDIV8,
-		.ratio = NRF_I2S_RATIO_256X,
-	};
+	int result;
+	int ret;
 
-	nrf_i2s_configure(NRF_I2S0, &config);
+	hfclk_manager = z_nrf_clock_control_get_onoff(CLOCK_CONTROL_NRF_SUBSYS_HF);
+	if (hfclk_manager == NULL) {
+		return -ENODEV;
+	}
+
+	sys_notify_init_spinwait(&hfclk_client.notify);
+	ret = onoff_request(hfclk_manager, &hfclk_client);
+	if (ret < 0) {
+		return ret;
+	}
+	int64_t deadline = k_uptime_get() + HFXO_START_TIMEOUT_MS;
+	while (sys_notify_fetch_result(&hfclk_client.notify, &result) != 0) {
+		if (k_uptime_get() >= deadline) {
+			(void)onoff_cancel_or_release(hfclk_manager, &hfclk_client);
+			return -ETIMEDOUT;
+		}
+		k_busy_wait(50);
+	}
+	if (result < 0) {
+		return result;
+	}
+
+	hfclk_requested = true;
+	return 0;
+}
+
+static int hfclk_release(void)
+{
+	int ret = 0;
+
+	if (hfclk_requested) {
+		ret = onoff_release(hfclk_manager);
+		hfclk_requested = false;
+	}
+
+	return MIN(ret, 0);
 }
 
 static int codec_write(uint8_t reg, uint8_t value)
@@ -112,9 +153,12 @@ static int codec_prepare(bool headphones)
 
 	uint8_t pll_status;
 	ret = i2c_reg_read_byte_dt(&codec, DA7212_PLL_STATUS, &pll_status);
+	if (ret < 0) {
+		return ret;
+	}
 	printk("DA7212 PLL status: 0x%02x\n", pll_status);
-	if (ret < 0 || (pll_status & 0x03U) != 0x03U) {
-		return ret < 0 ? ret : -EIO;
+	if ((pll_status & 0x07U) != 0x07U) {
+		return -EIO;
 	}
 
 	if (headphones) {
@@ -163,90 +207,171 @@ static void fill_tone(int16_t *samples, unsigned int block)
 	}
 }
 
-static int queue_tone_block(unsigned int block)
+static void speaker_data_handler(const nrfx_i2s_buffers_t *released, uint32_t status)
 {
-	void *buffer;
-	int ret = k_mem_slab_alloc(&speaker_slab, &buffer, K_MSEC(I2S_TIMEOUT_MS));
+	ARG_UNUSED(released);
 
+	if ((status & NRFX_I2S_STATUS_NEXT_BUFFERS_NEEDED) != 0U && speaker_running) {
+		nrfx_i2s_buffers_t next = {
+			.p_tx_buffer = speaker_buffers[next_buffer],
+			.p_rx_buffer = NULL,
+			.buffer_size = BLOCK_WORDS,
+		};
+
+		fill_tone((int16_t *)speaker_buffers[next_buffer], tone_block++);
+		if (nrfx_i2s_next_buffers_set(&i2s_instance, &next) != NRFX_SUCCESS) {
+			speaker_stream_error = -EIO;
+		}
+		next_buffer = (next_buffer + 1U) % BUFFER_COUNT;
+	}
+
+	if ((status & NRFX_I2S_STATUS_TRANSFER_STOPPED) != 0U) {
+		k_sem_give(&speaker_transfer_stopped);
+	}
+}
+
+static int direct_i2s_start(void)
+{
+	nrfx_i2s_config_t config = NRFX_I2S_DEFAULT_CONFIG(
+		CYBERDECK_I2S_SCK_PIN, CYBERDECK_I2S_LRCK_PIN, CYBERDECK_I2S_MCK_PIN,
+		CYBERDECK_I2S_SDOUT_PIN, CYBERDECK_I2S_SDIN_PIN);
+	nrfx_i2s_buffers_t initial = {
+		.p_tx_buffer = speaker_buffers[0],
+		.p_rx_buffer = NULL,
+		.buffer_size = BLOCK_WORDS,
+	};
+	nrfx_err_t err;
+	int ret;
+
+	if (nrfx_i2s_init_check(&i2s_instance)) {
+		return -EBUSY;
+	}
+	ret = hfclk_request();
 	if (ret < 0) {
 		return ret;
 	}
-	fill_tone(buffer, block);
-	ret = i2s_write(i2s, buffer, BLOCK_SIZE);
-	if (ret < 0) {
-		k_mem_slab_free(&speaker_slab, buffer);
+
+	config.irq_priority = DT_IRQ(DT_NODELABEL(i2s0), priority);
+	config.mode = NRF_I2S_MODE_SLAVE;
+	config.format = NRF_I2S_FORMAT_I2S;
+	config.alignment = NRF_I2S_ALIGN_LEFT;
+	config.sample_width = NRF_I2S_SWIDTH_16BIT;
+	config.channels = NRF_I2S_CHANNELS_STEREO;
+	config.mck_setup = NRF_I2S_MCK_32MDIV8;
+	config.ratio = NRF_I2S_RATIO_256X;
+
+	err = nrfx_i2s_init(&i2s_instance, &config, speaker_data_handler);
+	if (err != NRFX_SUCCESS) {
+		(void)hfclk_release();
+		return err == NRFX_ERROR_ALREADY ? -EBUSY : -EIO;
 	}
+	i2s_initialized = true;
+	fill_tone((int16_t *)speaker_buffers[0], 0U);
+	next_buffer = 1U;
+	tone_block = 1U;
+	speaker_stream_error = 0;
+	speaker_running = true;
+
+	err = nrfx_i2s_start(&i2s_instance, &initial, 0);
+	if (err != NRFX_SUCCESS) {
+		speaker_running = false;
+		nrfx_i2s_uninit(&i2s_instance);
+		i2s_initialized = false;
+		(void)hfclk_release();
+		return -EIO;
+	}
+	i2s_started = true;
+	return 0;
+}
+
+static int direct_i2s_stop(void)
+{
+	int ret = 0;
+
+	speaker_running = false;
+	if (i2s_started) {
+		nrfx_i2s_stop(&i2s_instance);
+		ret = k_sem_take(&speaker_transfer_stopped, K_MSEC(STOP_TIMEOUT_MS));
+		i2s_started = false;
+	}
+	if (i2s_initialized) {
+		nrfx_i2s_uninit(&i2s_instance);
+		i2s_initialized = false;
+	}
+	if (ret == 0) {
+		ret = hfclk_release();
+	} else {
+		(void)hfclk_release();
+	}
+
 	return ret;
+}
+
+static int codec_shutdown(void)
+{
+	static const uint8_t shutdown[][2] = {
+		{ DA7212_DAI_CLK_MODE, 0x00 },
+		{ DA7212_DAI_CTRL, 0x00 },
+		{ DA7212_SYSTEM_ACTIVE, 0x00 },
+	};
+	int first_error = 0;
+
+	for (size_t i = 0; i < ARRAY_SIZE(shutdown); i++) {
+		int ret = codec_write(shutdown[i][0], shutdown[i][1]);
+
+		if (first_error == 0 && ret < 0) {
+			first_error = ret;
+		}
+	}
+
+	return first_error;
 }
 
 static int play_tone(const struct shell *sh, bool headphones)
 {
-	struct i2s_config config = {
-		.word_size = 16,
-		.channels = 2,
-		.format = I2S_FMT_DATA_FORMAT_I2S,
-		.options = I2S_OPT_BIT_CLK_SLAVE | I2S_OPT_FRAME_CLK_SLAVE,
-		.frame_clk_freq = SAMPLE_RATE_HZ,
-		.mem_slab = &speaker_slab,
-		.block_size = BLOCK_SIZE,
-		.timeout = I2S_TIMEOUT_MS,
-	};
+	int codec_stop_ret;
+	int i2s_stop_ret;
 	int ret;
 
 	if (!initialized) {
 		return -EPERM;
 	}
 
-	ret = i2s_configure(i2s, I2S_DIR_TX, &config);
+	k_sem_reset(&speaker_transfer_stopped);
+	ret = direct_i2s_start();
 	if (ret < 0) {
-		goto out;
-	}
-	apply_authoritative_i2s_clock();
-	ret = queue_tone_block(0);
-	if (ret < 0) {
-		goto out;
-	}
-	ret = queue_tone_block(1);
-	if (ret < 0) {
-		goto out;
-	}
-	ret = i2s_trigger(i2s, I2S_DIR_TX, I2S_TRIGGER_START);
-	if (ret < 0) {
-		goto out;
+		shell_error(sh, "Fixed-clock nrfx I2S start failed (%d)", ret);
+		return ret;
 	}
 	k_msleep(10);
 
 	ret = codec_prepare(headphones);
 	if (ret < 0) {
-		goto drop;
+		goto out;
 	}
 	ret = codec_write(DA7212_DAI_CTRL, 0x80);
 	if (ret < 0) {
-		goto drop;
+		goto out;
 	}
 	ret = codec_write(DA7212_DAI_CLK_MODE, 0x81);
 	if (ret < 0) {
-		goto drop;
+		goto out;
 	}
 
-	for (unsigned int block = 2; block < PLAY_BLOCKS; block++) {
-		ret = queue_tone_block(block);
-		if (ret < 0) {
-			goto drop;
-		}
+	k_msleep(PLAY_DURATION_MS);
+	if (speaker_stream_error < 0) {
+		ret = speaker_stream_error;
 	}
-	ret = i2s_trigger(i2s, I2S_DIR_TX, I2S_TRIGGER_DRAIN);
-	if (ret == 0) {
-		k_msleep(100);
-	}
-	goto out;
 
-drop:
-	(void)i2s_trigger(i2s, I2S_DIR_TX, I2S_TRIGGER_DROP);
 out:
-	(void)codec_write(DA7212_DAI_CLK_MODE, 0x00);
-	(void)codec_write(DA7212_DAI_CTRL, 0x00);
-	(void)codec_write(DA7212_SYSTEM_ACTIVE, 0x00);
+	codec_stop_ret = codec_shutdown();
+	i2s_stop_ret = direct_i2s_stop();
+	if (ret == 0 && codec_stop_ret < 0) {
+		ret = codec_stop_ret;
+	}
+	if (ret == 0 && i2s_stop_ret < 0) {
+		ret = i2s_stop_ret;
+	}
 	if (ret < 0) {
 		shell_error(sh, "Audio test failed (%d)", ret);
 		return ret;
@@ -297,7 +422,7 @@ SHELL_SUBCMD_ADD((hwv), speaker, &sub_speaker_cmds, "DA7212 audio", NULL, 0, 0);
 
 int speaker_init(void)
 {
-	if (!i2c_is_ready_dt(&codec) || !device_is_ready(i2s)) {
+	if (!i2c_is_ready_dt(&codec) || !device_is_ready(i2s_dev)) {
 		return -ENODEV;
 	}
 	initialized = true;

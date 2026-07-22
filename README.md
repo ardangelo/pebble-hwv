@@ -142,15 +142,15 @@ To get meaningful status reports, you will need to plug the battery to `VBAT`,
 
 | Command | Description |
 | --- | --- |
-| `hwv speaker play` | Play sound on speaker |
-| `hwv speaker headphone` | Play a tone on both DA7212 headphone channels (Cyberdeck) |
+| `hwv speaker play` | Play a tone through fixed 4 MHz-MCK direct nrfx I2S (Cyberdeck) |
+| `hwv speaker headphone` | Play the same fixed-clock tone on both DA7212 headphone channels (Cyberdeck) |
 | `hwv speaker codec` | Read DA7212 identification/status registers (Cyberdeck) |
 
 ### Microphone
 
 | Command | Description |
 | --- | --- |
-| `hwv mic capture [$ARG]` | Asterix: capture optional seconds to flash; Cyberdeck: capture optional 16-ms I2S blocks and report min/max/DC/span |
+| `hwv mic capture [$ARG]` | Asterix: capture optional seconds to flash; Cyberdeck: capture the physically validated DA7212 MIC1_P route in optional 16-ms blocks using fixed 4 MHz-MCK direct nrfx I2S with codec-master 16 kHz frames and report RMS/DC/clipping diagnostics |
 
 For Asterix PDM captures, use a tone generator and `scripts/wavgen.py` to verify the emitted sample stream:
 

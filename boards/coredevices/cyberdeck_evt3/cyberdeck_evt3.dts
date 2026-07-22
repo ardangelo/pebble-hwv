@@ -137,7 +137,7 @@
 	lsm6dso: imu-sensor@6b {
 		compatible = "st,lsm6dso";
 		reg = <0x6b>;
-		irq-gpios = <&gpio0 10 GPIO_ACTIVE_HIGH>;
+		irq-gpios = <&gpio0 9 GPIO_ACTIVE_HIGH>;
 		drdy-pulsed;
 		accel-pm = <LSM6DSO_DT_XL_ULP_MODE>;
 		gyro-pm = <LSM6DSO_DT_GY_NORMAL_MODE>;
