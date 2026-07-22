@@ -10,12 +10,14 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/led.h>
 #include <zephyr/drivers/pwm.h>
+#include <zephyr/kernel.h>
 #include <zephyr/drivers/spi.h>
 #include <zephyr/logging/log.h>
 
 LOG_MODULE_REGISTER(LS013B7DH0X_LOG_MODULE, CONFIG_DISPLAY_LOG_LEVEL);
 
 #define LS013B7DH05_WRITE BIT(0)
+#define LS013B7DH05_CLEAR BIT(2)
 
 struct ls013b7dh05_config {
 	struct spi_dt_spec spi;
@@ -26,6 +28,8 @@ struct ls013b7dh05_config {
 	uint16_t height;
 	uint8_t line_width;
 	uint8_t *fb;
+	uint8_t *tx;
+	uint32_t tx_size;
 	uint32_t fb_size;
 	bool initially_on;
 };
@@ -90,45 +94,32 @@ static int ls013b7dh05_write(const struct device *dev, uint16_t x, uint16_t y,
 	struct spi_buf sbuf;
 	struct spi_buf_set sbufs = {.buffers = &sbuf, .count = 1U};
 	int ret;
-	const uint8_t *pbuf = buf;
 
 	if (buf != config->fb) {
 		LOG_ERR("Unsupported buffer");
 		return -EINVAL;
 	}
 
-	if (x != 0U || desc->height == 0U || y + desc->height > config->height) {
-		LOG_ERR("Unsupported position");
+	if (x != 0U || y != 0U || desc->height != config->height ||
+	    desc->pitch != config->width + 16U || desc->buf_size < config->fb_size) {
+		LOG_ERR("Only a full wire-format frame is supported");
 		return -EINVAL;
 	}
 
-	uint8_t init[2] = {LS013B7DH05_WRITE, y + 1U};
-	sbuf.buf = init;
-	sbuf.len = 2U;
+	uint8_t clear[2] = {LS013B7DH05_CLEAR, 0U};
+	sbuf.buf = clear;
+	sbuf.len = sizeof(clear);
 	ret = spi_write_dt(&config->spi, &sbufs);
 	if (ret < 0) {
-		goto release;
+		return ret;
 	}
+	k_busy_wait(4U);
 
-	sbuf.buf = (void *)&pbuf[y * desc->pitch / 8U];
-	sbuf.len = desc->height * desc->pitch / 8U - 1U;
-	ret = spi_write_dt(&config->spi, &sbufs);
-	if (ret < 0) {
-		goto release;
-	}
-
-	uint8_t end = 0U;
-	sbuf.buf = &end;
-	sbuf.len = 1U;
-	ret = spi_write_dt(&config->spi, &sbufs);
-	if (ret < 0) {
-		goto release;
-	}
-
-release:
-	(void)spi_release_dt(&config->spi);
-
-	return ret;
+	config->tx[0] = LS013B7DH05_WRITE;
+	config->tx[1] = 1U;
+	sbuf.buf = config->tx;
+	sbuf.len = config->tx_size;
+	return spi_write_dt(&config->spi, &sbufs);
 }
 
 static int ls013b7dh05_set_brightness(const struct device *dev, uint8_t brightness)
@@ -222,15 +213,14 @@ static const struct display_driver_api ls013b7dh05_api = {
 };
 
 #define LS013B7DH05_DEFINE(n)                                                                      \
-	static uint8_t fb##n[(DT_INST_PROP(n, width) * DT_INST_PROP(n, height)) / 8U +             \
-			     DT_INST_PROP(n, height) * 2U];                                        \
+	static uint8_t tx##n[2U + (DT_INST_PROP(n, width) * DT_INST_PROP(n, height)) / 8U +        \
+			     DT_INST_PROP(n, height) * 2U];                                       \
                                                                                                    \
 	static const struct ls013b7dh05_config ls013b7dh05_config_##n = {                          \
 		.spi = SPI_DT_SPEC_INST_GET(n,                                                     \
 					    SPI_OP_MODE_MASTER | SPI_WORD_SET(8U) |                \
-						    SPI_TRANSFER_LSB | SPI_CS_ACTIVE_HIGH |        \
-						    SPI_HOLD_ON_CS | SPI_LOCK_ON,                  \
-					    0U),                                                   \
+						    SPI_TRANSFER_LSB | SPI_CS_ACTIVE_HIGH,          \
+					    7U),                                                         \
 		.disp = GPIO_DT_SPEC_INST_GET(n, disp_gpios),                                      \
 		.extcomin = PWM_DT_SPEC_INST_GET(n),                                               \
 		.backlight = DEVICE_DT_GET(DT_INST_PHANDLE(n, backlight)),                         \
@@ -238,8 +228,10 @@ static const struct display_driver_api ls013b7dh05_api = {
 		.width = DT_INST_PROP(n, width),                                                   \
 		.height = DT_INST_PROP(n, height),                                                 \
 		.line_width = DIV_ROUND_UP(DT_INST_PROP(n, width), 8U),                            \
-		.fb = fb##n,                                                                       \
-		.fb_size = ARRAY_SIZE(fb##n),                                                      \
+		.tx = tx##n,                                                                        \
+		.tx_size = ARRAY_SIZE(tx##n),                                                       \
+		.fb = &tx##n[2],                                                                     \
+		.fb_size = ARRAY_SIZE(tx##n) - 2U,                                                  \
 	};                                                                                         \
                                                                                                    \
 	DEVICE_DT_INST_DEFINE(n, &ls013b7dh05_init, NULL, NULL, &ls013b7dh05_config_##n,           \

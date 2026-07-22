@@ -30,7 +30,7 @@ static int cmd_imu_get(const struct shell *sh, size_t argc, char **argv)
 
 	/* ODR: 12.5 Hz */
 	odr.val1 = 12;
-	odr.val2 = 0;
+	odr.val2 = 500000;
 
 	err = sensor_attr_set(imu, SENSOR_CHAN_ACCEL_XYZ, SENSOR_ATTR_SAMPLING_FREQUENCY, &odr);
 	if (err < 0) {
@@ -41,6 +41,7 @@ static int cmd_imu_get(const struct shell *sh, size_t argc, char **argv)
 	if (err < 0) {
 		return err;
 	}
+	k_msleep(100);
 
 	err = sensor_sample_fetch(imu);
 	if (err < 0) {
@@ -102,13 +103,14 @@ static int cmd_imu_interrupt(const struct shell *sh, size_t argc, char **argv)
 	}
 
 	k_sem_reset(&imu_interrupt);
-	ret = sensor_attr_set(imu, SENSOR_CHAN_ACCEL_XYZ, SENSOR_ATTR_SAMPLING_FREQUENCY, &odr);
-	if (ret < 0) {
-		return ret;
-	}
 	ret = sensor_trigger_set(imu, &trigger, imu_trigger_handler);
 	if (ret < 0) {
 		shell_error(sh, "Failed to enable IMU INT1 (%d)", ret);
+		return ret;
+	}
+	ret = sensor_attr_set(imu, SENSOR_CHAN_ACCEL_XYZ, SENSOR_ATTR_SAMPLING_FREQUENCY, &odr);
+	if (ret < 0) {
+		(void)sensor_trigger_set(imu, &trigger, NULL);
 		return ret;
 	}
 

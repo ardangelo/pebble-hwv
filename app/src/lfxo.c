@@ -8,6 +8,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/shell/shell.h>
 #include <zephyr/sys/timeutil.h>
+#include <zephyr/sys/onoff.h>
 
 #define MEASURE_TIME_S 10
 
@@ -23,6 +24,8 @@ static int cmd_lfxo_test(const struct shell *sh, size_t argc, char **argv)
 	struct timeutil_sync_config sync_config = { 0};
 	struct timeutil_sync_state sync_state = { 0 };
 	uint64_t counter_ref = 0U;
+	struct onoff_manager *hf_mgr;
+	struct onoff_client hf_cli;
 
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
@@ -32,9 +35,21 @@ static int cmd_lfxo_test(const struct shell *sh, size_t argc, char **argv)
 		return -EPERM;
 	}
 
-	ret = clock_control_on(sys_clock, CLOCK_CONTROL_NRF_SUBSYS_HF);
+	hf_mgr = z_nrf_clock_control_get_onoff(CLOCK_CONTROL_NRF_SUBSYS_HF);
+	if (hf_mgr == NULL) {
+		return -ENODEV;
+	}
+	sys_notify_init_spinwait(&hf_cli.notify);
+	ret = onoff_request(hf_mgr, &hf_cli);
 	if (ret < 0) {
-		shell_error(sh, "Failed to start HF clock: %d\n", ret);
+		shell_error(sh, "Failed to request HF clock: %d", ret);
+		return ret;
+	}
+	while (sys_notify_fetch_result(&hf_cli.notify, &ret)) {
+		/* Spin until HFXO is running. */
+	}
+	if (ret < 0) {
+		shell_error(sh, "Failed to start HF clock: %d", ret);
 		return ret;
 	}
 
@@ -100,9 +115,9 @@ static int cmd_lfxo_test(const struct shell *sh, size_t argc, char **argv)
 		return ret;
 	}
 
-	ret = clock_control_off(sys_clock, CLOCK_CONTROL_NRF_SUBSYS_HF);
+	ret = onoff_release(hf_mgr);
 	if (ret < 0) {
-		shell_error(sh, "Failed to stop HF clock: %d\n", ret);
+		shell_error(sh, "Failed to release HF clock: %d", ret);
 		return ret;
 	}
 

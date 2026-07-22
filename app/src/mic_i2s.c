@@ -6,6 +6,7 @@
 #include <zephyr/drivers/i2s.h>
 #include <zephyr/kernel.h>
 #include <zephyr/shell/shell.h>
+#include <hal/nrf_i2s.h>
 
 #define DA7212_PLL_STATUS      0x03
 #define DA7212_CIF_CTRL        0x1d
@@ -33,16 +34,33 @@
 #define DA7212_SYSTEM_ACTIVE   0xfd
 
 #define SAMPLE_RATE_HZ 16000U
+/* Zephyr's generic API cannot select a fixed MCK ratio, so apply the authoritative nrfx setup. */
 #define BLOCK_FRAMES   256U
 #define BLOCK_SIZE     (BLOCK_FRAMES * 2U * sizeof(int16_t))
-#define BLOCK_COUNT    4U
+#define BLOCK_COUNT    12U
 #define DEFAULT_BLOCKS 16U
 #define I2S_TIMEOUT_MS 1000
+#define WARMUP_BLOCKS 8U
 
 static const struct i2c_dt_spec codec = I2C_DT_SPEC_GET(DT_NODELABEL(da7212));
 static const struct device *const i2s = DEVICE_DT_GET(DT_NODELABEL(i2s0));
 K_MEM_SLAB_DEFINE_STATIC(mic_slab, BLOCK_SIZE, BLOCK_COUNT, 4);
 static bool initialized;
+
+static void apply_authoritative_i2s_clock(void)
+{
+	const nrf_i2s_config_t config = {
+		.mode = NRF_I2S_MODE_MASTER,
+		.format = NRF_I2S_FORMAT_I2S,
+		.alignment = NRF_I2S_ALIGN_LEFT,
+		.sample_width = NRF_I2S_SWIDTH_16BIT,
+		.channels = NRF_I2S_CHANNELS_STEREO,
+		.mck_setup = NRF_I2S_MCK_32MDIV8,
+		.ratio = NRF_I2S_RATIO_256X,
+	};
+
+	nrf_i2s_configure(NRF_I2S0, &config);
+}
 
 static int codec_write(uint8_t reg, uint8_t value)
 {
@@ -84,6 +102,7 @@ static int codec_start_capture(void)
 
 	uint8_t pll_status;
 	ret = i2c_reg_read_byte_dt(&codec, DA7212_PLL_STATUS, &pll_status);
+	printk("DA7212 mic PLL status: 0x%02x\n", pll_status);
 	if (ret < 0 || (pll_status & 0x01U) == 0U) {
 		return ret < 0 ? ret : -EIO;
 	}
@@ -131,6 +150,8 @@ static int cmd_mic_capture(const struct shell *sh, size_t argc, char **argv)
 	int16_t maximum = INT16_MIN;
 	int64_t sum = 0;
 	uint32_t samples = 0;
+	uint64_t absolute_sum = 0U;
+	uint32_t clipped = 0U;
 	int ret;
 
 	if (!initialized) {
@@ -145,13 +166,29 @@ static int cmd_mic_capture(const struct shell *sh, size_t argc, char **argv)
 	if (ret < 0) {
 		return ret;
 	}
-	ret = codec_start_capture();
-	if (ret < 0) {
-		goto out;
-	}
+	apply_authoritative_i2s_clock();
 	ret = i2s_trigger(i2s, I2S_DIR_RX, I2S_TRIGGER_START);
 	if (ret < 0) {
+		shell_error(sh, "I2S start failed (%d)", ret);
 		goto out;
+	}
+	k_msleep(5);
+	ret = codec_start_capture();
+	if (ret < 0) {
+		shell_error(sh, "DA7212 microphone setup failed (%d)", ret);
+		goto stop;
+	}
+
+	for (unsigned int block = 0; block < WARMUP_BLOCKS; block++) {
+		void *buffer;
+		size_t size;
+
+		ret = i2s_read(i2s, &buffer, &size);
+		if (ret < 0) {
+			shell_error(sh, "I2S warmup block %u failed (%d)", block, ret);
+			goto stop;
+		}
+		k_mem_slab_free(&mic_slab, buffer);
 	}
 
 	for (unsigned long block = 0; block < blocks; block++) {
@@ -160,13 +197,19 @@ static int cmd_mic_capture(const struct shell *sh, size_t argc, char **argv)
 
 		ret = i2s_read(i2s, &buffer, &size);
 		if (ret < 0) {
+			shell_error(sh, "I2S capture block %lu failed (%d)", block, ret);
 			goto stop;
 		}
 		int16_t *pcm = buffer;
-		for (size_t i = 0; i < size / sizeof(*pcm); i++) {
-			minimum = MIN(minimum, pcm[i]);
-			maximum = MAX(maximum, pcm[i]);
-			sum += pcm[i];
+		/* DA7212 routes MIC1 to the left slot; the right slot is not valid microphone data. */
+		for (size_t i = 0; i < size / sizeof(*pcm); i += 2U) {
+			int32_t sample = pcm[i];
+
+			minimum = MIN(minimum, sample);
+			maximum = MAX(maximum, sample);
+			sum += sample;
+			absolute_sum += sample < 0 ? (uint32_t)-sample : (uint32_t)sample;
+			clipped += sample == INT16_MIN || sample == INT16_MAX;
 			samples++;
 		}
 		k_mem_slab_free(&mic_slab, buffer);
@@ -182,12 +225,18 @@ out:
 	}
 
 	int32_t dc = samples == 0U ? 0 : (int32_t)(sum / samples);
+	uint32_t mean_abs = samples == 0U ? 0U : (uint32_t)(absolute_sum / samples);
 	int32_t span = (int32_t)maximum - minimum;
-	shell_print(sh, "MIC samples=%u min=%d max=%d dc=%d span=%d", samples, minimum, maximum,
-		    dc, span);
+	shell_print(sh, "MIC samples=%u min=%d max=%d dc=%d mean_abs=%u clipped=%u span=%d", samples,
+		    minimum, maximum, dc, mean_abs, clipped, span);
 	if (span < 64) {
 		shell_error(sh, "Microphone signal is missing or implausibly quiet");
 		return -ENODATA;
+	}
+	if (clipped > samples / 20U) {
+		shell_error(sh, "Microphone signal is implausibly clipped (%u/%u samples)", clipped,
+			    samples);
+		return -ERANGE;
 	}
 
 	shell_print(sh, "Microphone capture passed");
