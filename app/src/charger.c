@@ -13,17 +13,42 @@ static int cmd_charger_status(const struct shell *sh, size_t argc, char **argv)
 	struct sensor_value error;
 	struct sensor_value status;
 	struct sensor_value vbus_present;
+	int ret;
 
-	sensor_sample_fetch(charger);
-	sensor_channel_get(charger, SENSOR_CHAN_GAUGE_VOLTAGE, &volt);
-	sensor_channel_get(charger, SENSOR_CHAN_GAUGE_AVG_CURRENT, &current);
-	sensor_channel_get(charger, SENSOR_CHAN_GAUGE_TEMP, &temp);
-	sensor_channel_get(charger, (enum sensor_channel)SENSOR_CHAN_NPM1300_CHARGER_STATUS,
-			   &status);
-	sensor_channel_get(charger, (enum sensor_channel)SENSOR_CHAN_NPM1300_CHARGER_ERROR, &error);
-	sensor_attr_get(charger, (enum sensor_channel)SENSOR_CHAN_NPM1300_CHARGER_VBUS_STATUS,
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+	if (!initialized) {
+		return -ENODEV;
+	}
+
+	ret = sensor_sample_fetch(charger);
+	if (ret == 0) {
+		ret = sensor_channel_get(charger, SENSOR_CHAN_GAUGE_VOLTAGE, &volt);
+	}
+	if (ret == 0) {
+		ret = sensor_channel_get(charger, SENSOR_CHAN_GAUGE_AVG_CURRENT, &current);
+	}
+	if (ret == 0) {
+		ret = sensor_channel_get(charger, SENSOR_CHAN_GAUGE_TEMP, &temp);
+	}
+	if (ret == 0) {
+		ret = sensor_channel_get(charger,
+			(enum sensor_channel)SENSOR_CHAN_NPM1300_CHARGER_STATUS, &status);
+	}
+	if (ret == 0) {
+		ret = sensor_channel_get(charger,
+			(enum sensor_channel)SENSOR_CHAN_NPM1300_CHARGER_ERROR, &error);
+	}
+	if (ret == 0) {
+		ret = sensor_attr_get(charger,
+			(enum sensor_channel)SENSOR_CHAN_NPM1300_CHARGER_VBUS_STATUS,
 			(enum sensor_attribute)SENSOR_ATTR_NPM1300_CHARGER_VBUS_PRESENT,
 			&vbus_present);
+	}
+	if (ret < 0) {
+		shell_error(sh, "nPM1300 status read failed (%d)", ret);
+		return ret;
+	}
 
 	shell_print(sh, "V: %d.%03d ", volt.val1, volt.val2 / 1000);
 

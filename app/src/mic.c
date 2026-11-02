@@ -15,6 +15,7 @@
 #define CAPTURE_MS     200
 #define BLOCK_SIZE     ((SAMPLE_BITS / BITS_PER_BYTE) * (SAMPLE_RATE_HZ * CAPTURE_MS) / 1000)
 #define BLOCK_COUNT    4
+#define MAX_SECONDS    1U
 
 static const struct device *const dmic = DEVICE_DT_GET(DT_ALIAS(dmic0));
 static const struct device *const flash = DEVICE_DT_GET(DT_ALIAS(flash0));
@@ -49,11 +50,13 @@ static bool initialized;
 static int cmd_mic_capture(const struct shell *sh, size_t argc, char **argv)
 {
 	int ret;
-	unsigned int time;
+	unsigned long time;
+	char *end;
 	unsigned int captures;
 	struct flash_pages_info info;
 	uint32_t addr;
 	uint32_t total_size;
+	uint64_t flash_size;
 	int16_t buf;
 
 	if (!initialized) {
@@ -61,13 +64,18 @@ static int cmd_mic_capture(const struct shell *sh, size_t argc, char **argv)
 		return -EPERM;
 	}
 
+	time = 1U;
 	if (argc > 1) {
-		time = strtoul(argv[1], NULL, 10);
-	} else {
-		time = 1U;
+		time = strtoul(argv[1], &end, 10);
+		if (*argv[1] == '\0' || *end != '\0') {
+			return -EINVAL;
+		}
 	}
-
-	captures = time * (1000 / CAPTURE_MS);
+	if (time == 0U || time > MAX_SECONDS) {
+		shell_error(sh, "Capture duration must be 1-%u seconds", MAX_SECONDS);
+		return -EINVAL;
+	}
+	captures = time * (1000U / CAPTURE_MS);
 
 	ret = pm_device_action_run(flash, PM_DEVICE_ACTION_RESUME);
 	if (ret < 0) {
@@ -81,7 +89,16 @@ static int cmd_mic_capture(const struct shell *sh, size_t argc, char **argv)
 		goto err;
 	}
 
+	ret = flash_get_size(flash, &flash_size);
+	if (ret < 0) {
+		goto err;
+	}
 	total_size = DIV_ROUND_UP(BLOCK_SIZE * captures, info.size) * info.size;
+	if (total_size > flash_size) {
+		ret = -ENOSPC;
+		shell_error(sh, "Capture exceeds flash storage");
+		goto err;
+	}
 	ret = flash_erase(flash, 0, total_size);
 	if (ret < 0) {
 		shell_error(sh, "Failed to erase flash (%d)", ret);
@@ -111,11 +128,19 @@ static int cmd_mic_capture(const struct shell *sh, size_t argc, char **argv)
 			shell_error(sh, "DMIC read failed (%d)", ret);
 			goto err;
 		}
+		if (size != BLOCK_SIZE) {
+			k_mem_slab_free(&mem_slab, buffer);
+			(void)dmic_trigger(dmic, DMIC_TRIGGER_STOP);
+			ret = -EIO;
+			shell_error(sh, "Unexpected DMIC block size %u", size);
+			goto err;
+		}
 
 		ret = flash_write(flash, addr, buffer, size);
 		if (ret < 0) {
 			(void)dmic_trigger(dmic, DMIC_TRIGGER_STOP);
 			shell_error(sh, "Failed to write to flash (%d)", ret);
+			k_mem_slab_free(&mem_slab, buffer);
 			goto err;
 		}
 
@@ -139,7 +164,6 @@ static int cmd_mic_capture(const struct shell *sh, size_t argc, char **argv)
 
 		shell_print(sh, "%d", buf);
 	}
-	shell_print(sh, "E");
 
 	ret = flash_erase(flash, 0, total_size);
 	if (ret < 0) {
@@ -148,7 +172,17 @@ static int cmd_mic_capture(const struct shell *sh, size_t argc, char **argv)
 	}
 
 err:
-	(void)pm_device_action_run(flash, PM_DEVICE_ACTION_SUSPEND);
+	{
+		int suspend_ret = pm_device_action_run(flash, PM_DEVICE_ACTION_SUSPEND);
+		if (ret == 0 && suspend_ret < 0) {
+			ret = suspend_ret;
+		}
+	}
+	if (ret == 0) {
+		shell_print(sh, "E");
+	} else {
+		shell_error(sh, "Microphone capture failed (%d)", ret);
+	}
 	return ret;
 }
 

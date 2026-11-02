@@ -49,7 +49,8 @@
 #define BLOCK_FRAMES   256U
 #define BLOCK_WORDS    BLOCK_FRAMES
 #define BUFFER_COUNT   2U
-#define DEFAULT_BLOCKS 16U
+#define DEFAULT_SECONDS 1U
+#define MAX_SECONDS 1U
 #define WARMUP_BLOCKS  8U
 #define STOP_TIMEOUT_MS 100
 #define HFXO_START_TIMEOUT_MS 100
@@ -65,6 +66,7 @@ static const struct device *const i2s_dev = DEVICE_DT_GET(DT_NODELABEL(i2s0));
 static const nrfx_i2s_t i2s_instance = NRFX_I2S_INSTANCE(0);
 static uint32_t rx_buffers[BUFFER_COUNT][BLOCK_WORDS];
 static uint32_t tx_silence_buffers[BUFFER_COUNT][BLOCK_WORDS];
+static int16_t pcm_samples[MAX_SECONDS * 16000U];
 static struct onoff_manager *hfclk_manager;
 static struct onoff_client hfclk_client;
 static bool hfclk_requested;
@@ -72,13 +74,14 @@ static bool i2s_initialized;
 static bool i2s_started;
 static volatile bool capture_running;
 static uint8_t next_buffer;
+static volatile int capture_error;
+static volatile bool capture_active;
 static bool initialized;
 K_SEM_DEFINE(capture_complete, 0, 1);
 K_SEM_DEFINE(transfer_stopped, 0, 1);
 
 static struct {
-	unsigned long target_blocks;
-	unsigned long captured_blocks;
+	uint32_t target_samples;
 	unsigned int warmup_blocks;
 	int16_t minimum;
 	int16_t maximum;
@@ -92,6 +95,7 @@ static struct {
 	uint32_t samples;
 	uint32_t clipped;
 	uint32_t boundary_clipped;
+	uint32_t stored_samples;
 } capture;
 
 static int codec_write(uint8_t reg, uint8_t value)
@@ -145,6 +149,7 @@ static int hfclk_request(void)
 		k_busy_wait(50);
 	}
 	if (result < 0) {
+		(void)onoff_release(hfclk_manager);
 		return result;
 	}
 
@@ -169,11 +174,14 @@ static void capture_block(const uint32_t *buffer)
 	const int16_t *pcm = (const int16_t *)buffer;
 	bool collect = capture.warmup_blocks == 0U;
 
-	if (capture.captured_blocks >= capture.target_blocks) {
+	if (capture.stored_samples >= capture.target_samples) {
 		return;
 	}
 
 	for (size_t i = 0; i < BLOCK_FRAMES * 2U; i += 2U) {
+		if (collect && capture.stored_samples >= capture.target_samples) {
+			break;
+		}
 		int32_t sample = pcm[i + 1U];
 		int32_t dc = capture.dc_estimate >> 8;
 		int32_t ac = sample - dc;
@@ -192,6 +200,7 @@ static void capture_block(const uint32_t *buffer)
 		capture.ac_absolute_sum +=
 			ac_sample < 0 ? (uint32_t)-ac_sample : (uint32_t)ac_sample;
 		capture.sum_squares += (uint64_t)((int32_t)ac_sample * ac_sample);
+		pcm_samples[capture.stored_samples++] = (int16_t)sample;
 		bool clipped = sample <= -MIC_CLIP_LEVEL || sample >= MIC_CLIP_LEVEL;
 		capture.clipped += clipped;
 		capture.boundary_clipped += clipped && (i < 4U || i >= (BLOCK_FRAMES - 2U) * 2U);
@@ -202,8 +211,7 @@ static void capture_block(const uint32_t *buffer)
 		capture.warmup_blocks--;
 		return;
 	}
-	capture.captured_blocks++;
-	if (capture.captured_blocks == capture.target_blocks) {
+	if (capture.stored_samples == capture.target_samples) {
 		k_sem_give(&capture_complete);
 	}
 }
@@ -217,11 +225,16 @@ static void i2s_data_handler(const nrfx_i2s_buffers_t *released, uint32_t status
 			.buffer_size = BLOCK_WORDS,
 		};
 
-		(void)nrfx_i2s_next_buffers_set(&i2s_instance, &next);
+		nrfx_err_t err = nrfx_i2s_next_buffers_set(&i2s_instance, &next);
+		if (err != NRFX_SUCCESS) {
+			capture_error = -EIO;
+			k_sem_give(&capture_complete);
+		}
 		next_buffer = (next_buffer + 1U) % BUFFER_COUNT;
 	}
 
-	if (released != NULL && released->p_rx_buffer != NULL && capture_running) {
+	if (released != NULL && released->p_rx_buffer != NULL && capture_running &&
+	    capture_active && capture_error == 0) {
 		capture_block(released->p_rx_buffer);
 	}
 
@@ -424,7 +437,8 @@ static int codec_stop_capture(void)
 
 static int cmd_mic_capture(const struct shell *sh, size_t argc, char **argv)
 {
-	unsigned long blocks = argc > 1 ? strtoul(argv[1], NULL, 0) : DEFAULT_BLOCKS;
+	unsigned long seconds = DEFAULT_SECONDS;
+	char *end;
 	uint32_t timeout_ms;
 	int ret;
 	int stop_ret;
@@ -433,20 +447,29 @@ static int cmd_mic_capture(const struct shell *sh, size_t argc, char **argv)
 	if (!initialized) {
 		return -EPERM;
 	}
-	if (blocks == 0U || blocks > 125U) {
-		shell_error(sh, "Capture blocks must be 1-125 (16 ms each)");
+	if (argc > 1) {
+		seconds = strtoul(argv[1], &end, 10);
+		if (*argv[1] == '\0' || *end != '\0') {
+			shell_error(sh, "Capture duration must be whole seconds");
+			return -EINVAL;
+		}
+	}
+	if (seconds == 0U || seconds > MAX_SECONDS) {
+		shell_error(sh, "Capture duration must be 1-%u seconds (RAM limit)", MAX_SECONDS);
 		return -EINVAL;
 	}
 
 	memset(&capture, 0, sizeof(capture));
 	memset(tx_silence_buffers, 0, sizeof(tx_silence_buffers));
-	capture.target_blocks = blocks;
+	capture.target_samples = seconds * 16000U;
 	capture.ac_minimum = INT32_MAX;
 	capture.ac_maximum = INT32_MIN;
 	capture.warmup_blocks = WARMUP_BLOCKS;
 	capture.minimum = INT16_MAX;
 	capture.maximum = INT16_MIN;
 	k_sem_reset(&capture_complete);
+	capture_error = 0;
+	capture_active = false;
 	k_sem_reset(&transfer_stopped);
 
 	ret = direct_i2s_start();
@@ -461,15 +484,22 @@ static int cmd_mic_capture(const struct shell *sh, size_t argc, char **argv)
 		shell_error(sh, "DA7212 microphone setup failed (%d)", ret);
 		goto stop;
 	}
+	capture_active = true;
 
 	timeout_ms = CAPTURE_TIMEOUT_BASE_MS +
-		(uint32_t)(blocks + WARMUP_BLOCKS) * CAPTURE_BLOCK_TIMEOUT_MS;
+		(uint32_t)(DIV_ROUND_UP(capture.target_samples, BLOCK_FRAMES) + WARMUP_BLOCKS) *
+		CAPTURE_BLOCK_TIMEOUT_MS;
 	ret = k_sem_take(&capture_complete, K_MSEC(timeout_ms));
-	if (ret < 0) {
+	if (ret == 0 && capture_error != 0) {
+		ret = capture_error;
+		shell_error(sh, "nrfx I2S buffer transfer failed (%d)", ret);
+	}
+	if (ret == -EAGAIN) {
 		shell_error(sh, "Timed out waiting for nrfx I2S microphone data");
 	}
 
 stop:
+	capture_active = false;
 	codec_stop_ret = codec_stop_capture();
 	stop_ret = direct_i2s_stop();
 	if (ret == 0 && codec_stop_ret < 0) {
@@ -515,12 +545,17 @@ stop:
 	}
 
 	shell_print(sh, "Microphone capture passed");
+	shell_print(sh, "S");
+	for (uint32_t i = 0; i < capture.stored_samples; i++) {
+		shell_print(sh, "%d", pcm_samples[i]);
+	}
+	shell_print(sh, "E");
 	return 0;
 }
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	sub_mic_cmds,
-	SHELL_CMD_ARG(capture, NULL, "Capture DA7212 MIC1 [16-ms blocks]", cmd_mic_capture, 1, 1),
+	SHELL_CMD_ARG(capture, NULL, "Capture DA7212 MIC1 [seconds, max 1]", cmd_mic_capture, 1, 1),
 	SHELL_SUBCMD_SET_END);
 
 SHELL_SUBCMD_ADD((hwv), mic, &sub_mic_cmds, "DA7212 I2S microphone", NULL, 0, 0);

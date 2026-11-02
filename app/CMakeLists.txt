@@ -36,6 +36,7 @@ if (CONFIG_BOARD_CYBERDECK_EVT3)
     PRIVATE
       src/cyberdeck.c
       src/mic_i2s.c
+      src/charger_cyberdeck.c
       src/speaker_cyberdeck.c
   )
 endif()

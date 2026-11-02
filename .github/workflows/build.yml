@@ -2,7 +2,7 @@ name: Build
 
 on:
   push:
-    branches: [main]
+    branches: [main, mfg-parity]
   pull_request:
     branches: [main]
 

@@ -68,7 +68,6 @@ static const struct gpio_dt_spec ec_key = GPIO_DT_SPEC_GET(CONTROL_NODE, ec_key_
 static const struct pwm_dt_spec kbd_backlight = PWM_DT_SPEC_GET(KBD_BACKLIGHT_NODE);
 static const struct device *const rgb = DEVICE_DT_GET(DT_CHOSEN(zephyr_led_strip));
 
-static bool initialized;
 static bool tca_ready;
 static bool ofn_ready;
 
@@ -106,11 +105,19 @@ static int tca_initialize(void)
 	k_msleep(50);
 	for (unsigned int i = 0; i < 16U; i++) {
 		ret = i2c_reg_read_byte_dt(&tca, TCA_REG_KEY_EVENT_A, &value);
-		if (ret < 0 || value == 0U) {
+		if (ret < 0) {
+			tca_ready = false;
+			return ret;
+		}
+		if (value == 0U) {
 			break;
 		}
 	}
-	(void)reg_write(&tca, TCA_REG_INT_STAT, 0x0b);
+	ret = reg_write(&tca, TCA_REG_INT_STAT, 0x0b);
+	if (ret < 0) {
+		tca_ready = false;
+		return ret;
+	}
 	tca_ready = true;
 	return 0;
 }
@@ -126,12 +133,21 @@ static int ofn_initialize(void)
 	uint8_t pid;
 	int ret;
 
-	(void)gpio_pin_set_dt(&ofn_shutdown, 0);
+	ret = gpio_pin_set_dt(&ofn_shutdown, 0);
+	if (ret < 0) {
+		return ret;
+	}
 	k_msleep(120);
-	(void)gpio_pin_set_dt(&ofn_reset, 1);
+	ret = gpio_pin_set_dt(&ofn_reset, 1);
+	if (ret < 0) {
+		return ret;
+	}
 	k_msleep(1);
 	k_busy_wait(5);
-	(void)gpio_pin_set_dt(&ofn_reset, 0);
+	ret = gpio_pin_set_dt(&ofn_reset, 0);
+	if (ret < 0) {
+		return ret;
+	}
 	k_busy_wait(5);
 	k_msleep(30);
 
@@ -147,7 +163,11 @@ static int ofn_initialize(void)
 			return ret;
 		}
 	}
-	(void)i2c_reg_read_byte_dt(&ofn, OFN_REG_CLICK, &pid);
+	ret = i2c_reg_read_byte_dt(&ofn, OFN_REG_CLICK, &pid);
+	if (ret < 0) {
+		ofn_ready = false;
+		return ret;
+	}
 	ofn_ready = true;
 	return 0;
 }
@@ -200,16 +220,24 @@ static int cmd_status(const struct shell *sh, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
+	int power = gpio_pin_get_dt(&peripheral_power);
+	int lcd = gpio_pin_get_dt(&lcd_select);
+	int ec = gpio_pin_get_dt(&ec_key);
+	int keyboard = gpio_pin_get_dt(&tca_int);
+	int optical = gpio_pin_get_dt(&ofn_int);
+
+	if (power < 0 || lcd < 0 || ec < 0 || keyboard < 0 || optical < 0) {
+		shell_error(sh, "Control GPIO read failed");
+		return -EIO;
+	}
 	shell_print(sh, "HWV status power=%d lcd_sel=%d ec=%d kbd_int=%d ofn_int=%d",
-		    gpio_pin_get_dt(&peripheral_power), gpio_pin_get_dt(&lcd_select),
-		    gpio_pin_get_dt(&ec_key), gpio_pin_get_dt(&tca_int), gpio_pin_get_dt(&ofn_int));
-	shell_print(sh, "HWV status tca=%s ofn83=%s rgb=%s kbd_backlight=%s battery_adc=SKIP",
+		    power, lcd, ec, keyboard, optical);
+	shell_print(sh, "HWV status tca=%s ofn83=%s rgb=%s kbd_backlight=%s battery=hwv charger status",
 		    tca_ready ? "PASS" : "FAIL", ofn_ready ? "PASS" : "FAIL",
 		    device_is_ready(rgb) ? "PASS" : "FAIL",
 		    pwm_is_ready_dt(&kbd_backlight) ? "PASS" : "FAIL");
 	return tca_ready && ofn_ready && device_is_ready(rgb) && pwm_is_ready_dt(&kbd_backlight)
-		       ? 0
-		       : -ENODEV;
+		       ? 0 : -ENODEV;
 }
 
 static int set_power(const struct shell *sh, bool on)
@@ -322,8 +350,14 @@ static int cmd_ec_check(const struct shell *sh, size_t argc, char **argv)
 	bool pressed = false;
 	bool released = false;
 	int last = gpio_pin_get_dt(&ec_key);
-	int64_t deadline = k_uptime_get() + timeout_s * MSEC_PER_SEC;
+	if (last < 0) {
+		return last;
+	}
 
+	if (timeout_s == 0U || timeout_s > 120U) {
+		return -EINVAL;
+	}
+	int64_t deadline = k_uptime_get() + timeout_s * MSEC_PER_SEC;
 	shell_print(sh, "Press and release the EC/end key");
 	while (k_uptime_get() < deadline && !(pressed && released)) {
 		int current = gpio_pin_get_dt(&ec_key);
@@ -388,10 +422,13 @@ static int cmd_keyboard_check(const struct shell *sh, size_t argc, char **argv)
 			uint8_t code = event & 0x7fU;
 			bool is_down = (event & 0x80U) != 0U;
 			down[code] |= is_down;
-			up[code] |= !is_down;
+			up[code] |= !is_down && down[code];
 			shell_print(sh, "KBD raw=%u %s", code, is_down ? "down" : "up");
 		}
-		(void)reg_write(&tca, TCA_REG_INT_STAT, 0x01);
+		ret = reg_write(&tca, TCA_REG_INT_STAT, 0x01);
+		if (ret < 0) {
+			return ret;
+		}
 		k_msleep(5);
 	}
 
@@ -407,6 +444,33 @@ static int cmd_keyboard_check(const struct shell *sh, size_t argc, char **argv)
 	}
 	shell_print(sh, "KBD summary %u/%u keys passed", passed, ARRAY_SIZE(expected_keys));
 	return passed == ARRAY_SIZE(expected_keys) ? 0 : -ENODATA;
+}
+
+static int cmd_ofn_click(const struct shell *sh, size_t argc, char **argv)
+{
+	unsigned long timeout_s = argc > 1 ? strtoul(argv[1], NULL, 0) : 15U;
+	int64_t deadline;
+	uint8_t click;
+	int ret;
+
+	if (!ofn_ready || timeout_s == 0U || timeout_s > 120U) {
+		return !ofn_ready ? -ENODEV : -EINVAL;
+	}
+	deadline = k_uptime_get() + timeout_s * MSEC_PER_SEC;
+	shell_print(sh, "Press the physical 83_OFN click; polling click register 0x34");
+	while (k_uptime_get() < deadline) {
+		ret = i2c_reg_read_byte_dt(&ofn, OFN_REG_CLICK, &click);
+		if (ret < 0) {
+			return ret;
+		}
+		if ((click & OFN_CLICK_BITS) != 0U) {
+			shell_print(sh, "OFN click PASS (0x%02x)", click);
+			return 0;
+		}
+		k_msleep(8);
+	}
+	shell_error(sh, "OFN click timed out");
+	return -ETIMEDOUT;
 }
 
 static int cmd_keyboard_status(const struct shell *sh, size_t argc, char **argv)
@@ -511,11 +575,11 @@ static int cmd_fixture(const struct shell *sh, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
-	shell_print(sh, "GUIDED charge: verify TP4054 yellow CHRG# LED/current/termination");
+	shell_print(sh, "GUIDED charge: compare hwv charger status with DMM at VBAT/GND; measure TP4054 CHRG# LED, charge current and termination");
 	shell_print(sh, "GUIDED power: verify USB-only, battery-only, and source switchover");
 	shell_print(sh, "GUIDED rails: verify 5V, 3V3, and 1V8 test points under load");
 	shell_print(sh, "GUIDED debug: verify SWD program/halt/reset/read and USB CDC traffic");
-	shell_print(sh, "SKIP battery ADC: no confirmed EVT3 SAADC assignment");
+	shell_print(sh, "Battery voltage=hwv charger status; current, temperature, charge state unavailable");
 	return 0;
 }
 
@@ -533,6 +597,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	sub_ofn_cmds, SHELL_CMD(id, NULL, "Verify OFN83 product ID", cmd_ofn_id),
 	SHELL_CMD_ARG(motion, NULL, "Check OFN83 motion [seconds]", cmd_ofn_motion, 1, 1),
+	SHELL_CMD_ARG(click, NULL, "Check physical 83_OFN click [seconds]", cmd_ofn_click, 1, 1),
 	SHELL_SUBCMD_SET_END);
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
@@ -584,6 +649,5 @@ int cyberdeck_init(void)
 		return ret;
 	}
 
-	initialized = true;
 	return 0;
 }

@@ -5,10 +5,10 @@
 #include "lfxo.h"
 #include "light.h"
 #include "speaker.h"
+#include "charger.h"
 
 #if defined(CONFIG_BOARD_ASTERIX)
 #include "buttons.h"
-#include "charger.h"
 #include "mag.h"
 #include "mic.h"
 #include "press.h"
@@ -50,6 +50,7 @@ int main(void)
 	report_init("pressure sensor", press_init());
 #elif defined(CONFIG_BOARD_CYBERDECK_EVT3)
 	report_init("I2S microphone", mic_i2s_init());
+	report_init("battery ADC", charger_init());
 #endif
 
 	report_init("display", display_init());

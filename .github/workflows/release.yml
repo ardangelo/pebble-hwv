@@ -11,7 +11,7 @@ jobs:
 
     strategy:
       matrix:
-        board: ["asterix"]
+        board: ["asterix", "cyberdeck_evt3"]
 
     steps:
       - name: Checkout

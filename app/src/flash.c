@@ -91,13 +91,13 @@ static int cmd_flash_erase(const struct shell *sh, size_t argc, char **argv)
 		goto end;
 	}
 
-	ret = flash_erase(flash, addr, info.size);
+	ret = flash_erase(flash, info.start_offset, info.size);
 	if (ret < 0) {
 		shell_error(sh, "Failed to erase flash (%d)", ret);
 		goto end;
 	}
 
-	shell_print(sh, "Erased %d bytes at 0x%08x", info.size, addr);
+	shell_print(sh, "Erased %d bytes at 0x%08x", info.size, (uint32_t)info.start_offset);
 
 end:
 	(void)pm_device_action_run(flash, PM_DEVICE_ACTION_SUSPEND);
@@ -132,13 +132,28 @@ static int cmd_flash_erase_all(const struct shell *sh, size_t argc, char **argv)
 
 	shell_warn(sh, "Destructively erasing all %llu bytes", flash_size);
 	ret = flash_erase(flash, 0, (size_t)flash_size);
+	if (ret == 0) {
+		uint8_t sample[16];
+		const uint64_t offsets[] = { 0U, flash_size / 2U, flash_size - sizeof(sample) };
+
+		for (size_t i = 0; i < ARRAY_SIZE(offsets) && ret == 0; i++) {
+			ret = flash_read(flash, offsets[i], sample, sizeof(sample));
+			for (size_t j = 0; j < sizeof(sample) && ret == 0; j++) {
+				if (sample[j] != 0xffU) {
+					shell_error(sh, "Erase spot-check failed at 0x%08x",
+						    (uint32_t)(offsets[i] + j));
+					ret = -EIO;
+				}
+			}
+		}
+	}
 	(void)pm_device_action_run(flash, PM_DEVICE_ACTION_SUSPEND);
 	if (ret < 0) {
 		shell_error(sh, "Whole-chip erase failed (%d)", ret);
 		return ret;
 	}
 
-	shell_print(sh, "Whole-chip erase passed");
+	shell_print(sh, "Whole-chip erase completed; beginning/middle/end spot-check passed");
 	return 0;
 }
 
@@ -263,6 +278,10 @@ static int cmd_flash_stress(const struct shell *sh, size_t argc, char **argv)
 	} else {
 		iters = (unsigned int)strtoul(argv[1], NULL, 0);
 	}
+	if (iters == 0U || iters > 1000U) {
+		shell_error(sh, "Stress iterations must be 1-1000");
+		return -EINVAL;
+	}
 
 	ret = flash_get_size(flash, &flash_size);
 	if (ret < 0) {
@@ -293,6 +312,10 @@ static int cmd_flash_stress(const struct shell *sh, size_t argc, char **argv)
 			goto err_suspend;
 		}
 
+		if (info.size < FLASH_STRESS_TEST_SIZE) {
+			ret = -ENOSPC;
+			goto err_suspend;
+		}
 		shell_print(sh, "Stress test iteration %u: addr 0x%08x", i, (uint32_t)info.start_offset);
 
 		ret = flash_erase(flash, info.start_offset, info.size);

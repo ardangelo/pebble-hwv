@@ -50,7 +50,13 @@ Supported boards:
 
 ## Usage
 
-Asterix uses its configured UART console at 115200 8N1. Cyberdeck EVT3 exposes the shell as USB CDC through the on-board hub; the host should enumerate `Cyberdeck EVT3 HWV` and show a prompt on its CDC ACM port.
+Asterix uses UART at 115200 8N1. Cyberdeck EVT3 exposes USB CDC through the
+CH334R hub (`Cyberdeck EVT3 HWV`); open its CDC ACM port and check the version,
+startup diagnostics, and shell prompt before running commands. The release
+workflow runs for pushed `v*` tags and attaches separate
+`pebble-hwv_<board>_<version>.hex` images for Asterix and Cyberdeck. Pushes to
+`main` or `mfg-parity` run the two-board build workflow; a local branch build
+is not a published release.
 
 ### Cyberdeck EVT3
 
@@ -59,7 +65,7 @@ Cyberdeck commands are nRF-only and target the Q20 + 83_OFN assembly.
 | Command | Description |
 | --- | --- |
 | `hwv cyberdeck probe` | Probe DRV2604, OPT3001, DA7212, LSM6DSO, TCA8418, and OFN83 with fixture-readable PASS/FAIL lines |
-| `hwv cyberdeck status` | Summarize nRF control GPIOs and core device readiness; battery ADC is explicitly skipped |
+| `hwv cyberdeck status` | Summarize nRF control GPIOs and core device readiness; use `hwv charger status` for measured battery voltage |
 | `hwv cyberdeck power on\|off\|cycle` | Control `NRF_PERIPH_PW_EN`; `cycle` reinitializes TCA8418 and OFN83 |
 | `hwv cyberdeck rgb red\|green\|blue\|white\|off` | Verify WS2812 color order on P0.16 |
 | `hwv cyberdeck backlight $VAL` | Set Q20 keyboard backlight to `$VAL: 0-100` (capped at the firmware-defined 67% duty cycle) |
@@ -67,12 +73,15 @@ Cyberdeck commands are nRF-only and target the Q20 + 83_OFN assembly.
 | `hwv cyberdeck keyboard status` | Read TCA8418 interrupt/configuration/FIFO status |
 | `hwv cyberdeck keyboard check [$SECS]` | Require press and release events for every key in the current Q20 matrix map |
 | `hwv cyberdeck ofn id` | Require 83_OFN product ID `0x30`; A320 is rejected |
-| `hwv cyberdeck ofn motion [$SECS]` | Require OFN movement in positive and negative X/Y directions |
+| `hwv cyberdeck ofn motion [$SECS]` / `click [$SECS]` | Require OFN movement in positive and negative X/Y directions, and a physical click separately |
 | `hwv cyberdeck fixture` | Print guided TP4054, rail, switchover, SWD, and USB checks |
 | `hwv cyberdeck usb $TOKEN` | Echo a fixture token over USB CDC to prove shell RX/TX |
 | `hwv cyberdeck reset` | Cold-reset the nRF; require a fresh HWV boot banner |
 
-The W25Q256JW contents are disposable in Cyberdeck HWV. `erase_all`, flash stress, and microphone diagnostics may destroy the entire external flash. Battery ADC remains unimplemented because the authoritative EVT3 firmware board definition does not yet provide an SAADC assignment.
+The W25Q256JW contents are disposable only while Cyberdeck HWV owns the chip.
+Run `hwv flash id` (expect `ef 60 19`) before destructive erase/write/stress;
+`erase_all` checks completion and spot-checks the beginning, middle and end.
+Never run these commands after provisioning identity or recovery images.
 
 ### BLE
 
@@ -89,14 +98,22 @@ You can use any utility to test connection and writing to the exposed GATT chara
 | --- | --- |
 | `hwv buttons check` | Check if buttons are pressed/release |
 
-### Charger (Asterix only)
+### Charger and battery
 
 | Command | Description |
 | --- | --- |
-| `hwv charger status` | Check charger status |
+| `hwv charger status` | Asterix: nPM1300 telemetry; Cyberdeck: ADC-measured VBAT in mV and nRF USB VBUS detection |
 
-To get meaningful status reports, you will need to plug the battery to `VBAT`,
-`GND` and `NTC`. To test charging, connect `VBUS` to +5V.
+Cyberdeck EVT3 schematic sheets 5 and 7 connect `VBAT_VOL` to nRF
+P0.31/AIN7 through R76=300 kΩ and R77=100 kΩ (4:1 divider). Compare the
+reported VBAT to a DMM across the battery contacts. TP4054 exposes its
+`CHRG#` yellow LED, not digital charge telemetry: battery current, temperature,
+charge state, capacity and termination are **not measured by HWV**. With a
+suitable battery and USB supply, measure charging current externally in series
+with the battery and observe LED behavior through termination. Use the
+board-specific operating procedure for agreed electrical limits; no ADC
+reading alone establishes a pass for the charging circuit. On Asterix connect
+the battery to `VBAT`, `GND`, `NTC` and +5 V to `VBUS` for charger testing.
 
 ### Display
 
@@ -150,22 +167,33 @@ To get meaningful status reports, you will need to plug the battery to `VBAT`,
 
 | Command | Description |
 | --- | --- |
-| `hwv mic capture [$ARG]` | Asterix: capture optional seconds to flash; Cyberdeck: capture the physically validated DA7212 MIC1_P route in optional 16-ms blocks using fixed 4 MHz-MCK direct nrfx I2S with codec-master 16 kHz frames and report RMS/DC/clipping diagnostics |
+| `hwv mic capture [$SECS]` | Both boards: capture one second (default/max), at 16 kHz, mono signed 16-bit; Asterix PDM uses disposable flash and Cyberdeck DA7212 MIC1_P uses bounded RAM. Both emit `S`, one decimal sample per line, `E`; Cyberdeck also reports RMS/DC/clipping diagnostics before the stream. |
 
-For Asterix PDM captures, use a tone generator and `scripts/wavgen.py` to verify the emitted sample stream:
+Install `pyserial` on the host. For either board, apply a test tone at the
+microphone and capture a WAV from the console port:
 
 ```shell
-python scripts/wavgen.py -p /dev/$PORT -o test.wav [-s $SECS]
+python scripts/wavgen.py -p /dev/$PORT -o test.wav -s 1
 ```
 
-Then listen the generated WAV file in loop mode using any audio player. You
-should hear the same tone you generated.
+`wavgen.py` requires exactly 16,000 samples and fails on timeout, truncated
+output, bad samples or a reported HWV error; it does not create a partial WAV.
+Check the WAV is one second at 16 kHz and listen for the applied tone. The
+Cyberdeck path preserves its MIC1/codec-master 16-kHz clocks and fixed 4-MHz
+MCK. Its RAM bound is one second; Asterix checks flash capacity before erasure.
 
 ### LFXO accuracy
 
 | Command | Description |
 | --- | --- |
-| `hwv lfxo test` | Obtain LFXO accuracy |
+| `hwv lfxo test` | Compare LF crystal-derived kernel ticks against an HFXO-driven timer over ten seconds; report signed error in parts per billion (ppb). |
+
+The board defconfig selects the 20-ppm LF crystal source. Apply the agreed
+absolute error limit to `abs(ppb) / 1000` (ppm); the number reported by HWV is
+**not** an absolute-error pass/fail decision without that limit. Check clock
+configuration if this test is used with a different build. An external
+frequency counter is required only if the agreed accuracy specification
+demands an independent reference.
 
 ## Low power measurement tips
 
