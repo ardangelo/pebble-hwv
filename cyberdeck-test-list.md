@@ -17,6 +17,33 @@ fixture/device run. No electrical or acoustic production limit is certified
 here. Record unit identity, build/image version, fixture setup, raw readings,
 operator observations and failures separately.
 
+### Limited bench evidence for the parity changes
+
+On nRF MCU `88cc3fc2c80f7b0f`, source `ee93675` built for both boards. The
+Cyberdeck runtime check used a temporary VID/PID-only overlay (`cafe:4001`)
+because the attached host bridge discovers only that identity. Production
+HWV remains `0eea:0003`; its enumeration is therefore **not** verified by this
+run. The exercised HEX SHA-256 was
+`e31a8d851ac05dd32d805c27c0e9d65a03482328311a3de0c9387514a3fd9d7c`.
+
+- `hwv cyberdeck probe`: DRV2604, OPT3001, DA7212, LSM6DSO, TCA8418 and OFN83
+  all reported PASS; OFN product ID was `0x30`; flash ID was `ef 60 19`.
+- `hwv charger status`: 4180 mV and VBUS present. No DMM comparison or charging
+  current/temperature/termination measurement was made.
+- `hwv cyberdeck usb mfg-parity-88cc`: matching token and RX/TX PASS.
+- IMU returned `(0.036490, -0.188434, -9.805188)` m/s² and ALS 0.01 lux;
+  these stationary samples do not establish stimulated sensor acceptance.
+- `hwv lfxo test`: -7987 ppb relative to HFXO over ten seconds; no approved
+  absolute-error limit was available for a qualification decision.
+- `scripts/wavgen.py ... -s 1`: one-channel 16-bit WAV, 16 kHz, 16,000 frames,
+  one second. No controlled acoustic stimulus or listening acceptance occurred.
+  WAV SHA-256:
+  `a2a50b25ffe1c987689f3e5dd2e139b13c48f5a27b42b9ca0af2131c4365f1c7`.
+
+Destructive external-flash tests were not repeated over existing recovery/data.
+All unexercised physical checks in the inventory remain required. This is an
+engineering record without an allocated factory serial or SFC submission.
+
 Hardware reference: `/store/git/cyberdeck-firmware/cyberdeck-evt3.pdf`, sheets
 5–7 (EVT3 schematic). The local `cyberdeck-kicad` PCB is an older revision,
 not fitted-EVT3 pin/divider authority. Implementation in this repository is
