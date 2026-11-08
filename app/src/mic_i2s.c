@@ -219,6 +219,11 @@ static void capture_block(const uint32_t *buffer)
 static void i2s_data_handler(const nrfx_i2s_buffers_t *released, uint32_t status)
 {
 	if ((status & NRFX_I2S_STATUS_NEXT_BUFFERS_NEEDED) != 0U && capture_running) {
+		/* A NULL descriptor signals DMA reuse; keep feeding I2S until shutdown. */
+		if (released == NULL) {
+			capture_error = -EIO;
+			k_sem_give(&capture_complete);
+		}
 		nrfx_i2s_buffers_t next = {
 			.p_tx_buffer = tx_silence_buffers[next_buffer],
 			.p_rx_buffer = rx_buffers[next_buffer],
@@ -502,6 +507,10 @@ stop:
 	capture_active = false;
 	codec_stop_ret = codec_stop_capture();
 	stop_ret = direct_i2s_stop();
+	if (ret == 0 && capture_error != 0) {
+		ret = capture_error;
+		shell_error(sh, "nrfx I2S buffer transfer failed (%d)", ret);
+	}
 	if (ret == 0 && codec_stop_ret < 0) {
 		ret = codec_stop_ret;
 	}

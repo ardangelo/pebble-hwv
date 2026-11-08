@@ -186,6 +186,9 @@ output, bad samples or a reported HWV error; it does not create a partial WAV.
 Check the WAV is one second at 16 kHz and listen for the applied tone. The
 Cyberdeck path preserves its MIC1/codec-master 16-kHz clocks and fixed 4-MHz
 MCK. Its RAM bound is one second; Asterix checks flash capacity before erasure.
+Cyberdeck rejects a capture if nrfx reports a reused DMA buffer, even when the
+requested sample count was reached before shutdown. A failed capture emits no
+`S`/`E` PCM stream, so the host must not treat it as a valid WAV.
 
 ### LFXO accuracy
 
