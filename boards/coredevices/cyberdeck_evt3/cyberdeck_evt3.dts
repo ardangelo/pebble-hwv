@@ -218,12 +218,12 @@
 		backlight = <&lcd_backlight>;
 		height = <240>;
 		width = <400>;
-		initially-on;
 	};
 };
 
 &uicr {
 	gpio-as-nreset;
+	nfct-pins-as-gpios;
 };
 
 zephyr_udc0: &usbd {

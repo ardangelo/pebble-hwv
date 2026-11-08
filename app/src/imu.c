@@ -17,8 +17,8 @@ static void imu_trigger_handler(const struct device *dev, const struct sensor_tr
 {
 	ARG_UNUSED(trigger);
 
-	/* Reading OUTX_L_A through OUTZ_H_A clears the LSM6DSO data-ready condition. */
-	imu_interrupt_fetch_result = sensor_sample_fetch_chan(dev, SENSOR_CHAN_ACCEL_XYZ);
+	/* Drain both data-ready sources: the driver waits for XL and gyro to clear. */
+	imu_interrupt_fetch_result = sensor_sample_fetch(dev);
 	k_sem_give(&imu_interrupt);
 }
 
@@ -94,7 +94,7 @@ static int cmd_imu_get(const struct shell *sh, size_t argc, char **argv)
 
 static int cmd_imu_interrupt(const struct shell *sh, size_t argc, char **argv)
 {
-	struct sensor_value odr = { .val1 = 12, .val2 = 500000 };
+	struct sensor_value odr = { 0 };
 	unsigned long timeout_s = argc > 1 ? strtoul(argv[1], NULL, 0) : 5U;
 	int cleanup_ret = 0;
 	int ret;
@@ -105,6 +105,19 @@ static int cmd_imu_interrupt(const struct shell *sh, size_t argc, char **argv)
 	if (timeout_s == 0U || timeout_s > 60U) {
 		return -EINVAL;
 	}
+
+	/* A failed 'get' can leave the gyro sampling; stop it before arming INT1. */
+	ret = sensor_attr_set(imu, SENSOR_CHAN_GYRO_XYZ, SENSOR_ATTR_SAMPLING_FREQUENCY,
+			      &odr);
+	if (ret < 0) {
+		return ret;
+	}
+	ret = sensor_sample_fetch(imu);
+	if (ret < 0) {
+		return ret;
+	}
+	odr.val1 = 12;
+	odr.val2 = 500000;
 
 	k_sem_reset(&imu_interrupt);
 	imu_interrupt_fetch_result = -EINPROGRESS;
@@ -125,17 +138,15 @@ static int cmd_imu_interrupt(const struct shell *sh, size_t argc, char **argv)
 	} else if (imu_interrupt_fetch_result < 0) {
 		ret = imu_interrupt_fetch_result;
 		shell_error(sh, "IMU INT1 sample fetch failed (%d)", ret);
-	} else {
-		shell_print(sh, "IMU INT1 data-ready event received and cleared");
 	}
 
 cleanup:
-	/* Stop new samples and clear any pending DRDY before removing the callback. */
+	/* Stop new samples and clear both DRDY sources before removing the callback. */
 	odr.val1 = 0;
 	odr.val2 = 0;
 	int power_down_ret = sensor_attr_set(imu, SENSOR_CHAN_ACCEL_XYZ,
 					     SENSOR_ATTR_SAMPLING_FREQUENCY, &odr);
-	int fetch_ret = sensor_sample_fetch_chan(imu, SENSOR_CHAN_ACCEL_XYZ);
+	int fetch_ret = sensor_sample_fetch(imu);
 	int disable_ret = sensor_trigger_set(imu, &imu_accel_trigger, NULL);
 
 	if (disable_ret < 0) {
@@ -146,10 +157,13 @@ cleanup:
 		(fetch_ret < 0 ? fetch_ret : disable_ret);
 	if (ret == 0 && cleanup_ret < 0) {
 		ret = cleanup_ret;
+		shell_error(sh, "IMU INT1 cleanup failed (%d)", ret);
 	} else if (cleanup_ret < 0) {
 		shell_warn(sh, "IMU INT1 cleanup failed (%d)", cleanup_ret);
 	}
-
+	if (ret == 0) {
+		shell_print(sh, "IMU INT1 data-ready event received and cleared");
+	}
 	return ret;
 }
 
