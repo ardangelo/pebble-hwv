@@ -2,9 +2,9 @@ name: Build
 
 on:
   push:
-    branches: [main, mfg-parity]
+    branches: [main, cyberdeck]
   pull_request:
-    branches: [main]
+    branches: [main, cyberdeck]
 
 jobs:
   build:
