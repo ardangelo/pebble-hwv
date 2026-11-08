@@ -73,10 +73,23 @@ Cyberdeck commands are nRF-only and target the Q20 + 83_OFN assembly.
 | `hwv cyberdeck keyboard status` | Read TCA8418 interrupt/configuration/FIFO status |
 | `hwv cyberdeck keyboard check [$SECS]` | Require press and release events for every key in the current Q20 matrix map |
 | `hwv cyberdeck ofn id` | Require 83_OFN product ID `0x30`; A320 is rejected |
-| `hwv cyberdeck ofn motion [$SECS]` / `click [$SECS]` | Require OFN movement in positive and negative X/Y directions, and a physical click separately |
+| `hwv cyberdeck ofn motion [$SECS]` / `click [$SECS]` | Require OFN movement in positive and negative X/Y directions, and a physical touchpad-button press and release separately |
 | `hwv cyberdeck fixture` | Print guided TP4054, rail, switchover, SWD, and USB checks |
 | `hwv cyberdeck usb $TOKEN` | Echo a fixture token over USB CDC to prove shell RX/TX |
 | `hwv cyberdeck reset` | Cold-reset the nRF; require a fresh HWV boot banner |
+
+For `hwv cyberdeck ofn click 10`, wait for the prompt, physically press the
+touchpad button, then release it within ten seconds. The EVT3 schematic's
+`ROW1`/`COL1` nets connect to TCA8418 U12 `ROW0`/`COL0`; the switch reports raw
+key code `1` (`0x81` down, `0x01` up) through its keyboard event FIFO. The check
+discards queued events before prompting and requires a new down followed by
+an up for that key. Other keys, a release alone, or holding the button down
+cannot pass.
+
+Optical taps are different: OFN register `0x34` reports single/double-tap bits
+`0x10`/`0x20`, not this mechanical switch. The motion check still services
+product ID, motion status, pending Y/X deltas, then optical tap status in the
+reference driver's order. Optical taps cannot satisfy the physical-click check.
 
 The W25Q256JW contents are disposable only while Cyberdeck HWV owns the chip.
 Run `hwv flash id` (expect `ef 60 19`) before destructive erase/write/stress;

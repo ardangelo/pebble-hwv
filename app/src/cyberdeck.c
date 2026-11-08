@@ -33,6 +33,9 @@
 #define TCA_REG_GPIO_INT_LVL2  0x27
 #define TCA_REG_GPIO_INT_LVL3  0x28
 
+/* Q20 touchpad switch on schematic ROW1/COL1, separate from OFN tap status. */
+#define TCA_OFN_BUTTON_CODE 1U
+
 #define OFN_REG_PID      0x00
 #define OFN_REG_MOTION   0x02
 #define OFN_REG_DELTA_Y  0x03
@@ -446,30 +449,95 @@ static int cmd_keyboard_check(const struct shell *sh, size_t argc, char **argv)
 	return passed == ARRAY_SIZE(expected_keys) ? 0 : -ENODATA;
 }
 
-static int cmd_ofn_click(const struct shell *sh, size_t argc, char **argv)
-{
-	unsigned long timeout_s = argc > 1 ? strtoul(argv[1], NULL, 0) : 15U;
-	int64_t deadline;
+struct ofn_sample {
+	uint8_t motion;
 	uint8_t click;
-	int ret;
+	int8_t dx;
+	int8_t dy;
+};
 
-	if (!ofn_ready || timeout_s == 0U || timeout_s > 120U) {
-		return !ofn_ready ? -ENODEV : -EINVAL;
+static int ofn_read_sample(struct ofn_sample *sample)
+{
+	uint8_t pid, raw_x, raw_y;
+	int ret = i2c_reg_read_byte_dt(&ofn, OFN_REG_PID, &pid);
+
+	if (ret < 0) {
+		return ret;
 	}
-	deadline = k_uptime_get() + timeout_s * MSEC_PER_SEC;
-	shell_print(sh, "Press the physical 83_OFN click; polling click register 0x34");
-	while (k_uptime_get() < deadline) {
-		ret = i2c_reg_read_byte_dt(&ofn, OFN_REG_CLICK, &click);
+	if (pid != OFN_PRODUCT_ID) {
+		return -ENODEV;
+	}
+	*sample = (struct ofn_sample){ 0 };
+	ret = i2c_reg_read_byte_dt(&ofn, OFN_REG_MOTION, &sample->motion);
+	if (ret < 0) {
+		return ret;
+	}
+	/* Match Check_TouchPad(): service pending Y/X motion before click status. */
+	if ((sample->motion & OFN_MOTION_BIT) != 0U) {
+		ret = i2c_reg_read_byte_dt(&ofn, OFN_REG_DELTA_Y, &raw_y);
 		if (ret < 0) {
 			return ret;
 		}
-		if ((click & OFN_CLICK_BITS) != 0U) {
-			shell_print(sh, "OFN click PASS (0x%02x)", click);
-			return 0;
+		ret = i2c_reg_read_byte_dt(&ofn, OFN_REG_DELTA_X, &raw_x);
+		if (ret < 0) {
+			return ret;
 		}
-		k_msleep(8);
+		sample->dx = (int8_t)raw_x;
+		sample->dy = (int8_t)raw_y;
 	}
-	shell_error(sh, "OFN click timed out");
+	return i2c_reg_read_byte_dt(&ofn, OFN_REG_CLICK, &sample->click);
+}
+
+static int cmd_ofn_click(const struct shell *sh, size_t argc, char **argv)
+{
+	unsigned long timeout_s = argc > 1 ? strtoul(argv[1], NULL, 0) : 15U;
+	bool pressed = false;
+	uint8_t event;
+	int ret;
+
+	if (!tca_ready || timeout_s == 0U || timeout_s > 120U) {
+		return !tca_ready ? -ENODEV : -EINVAL;
+	}
+
+	/* Do not accept a press/release pair queued before this check started. */
+	for (unsigned int i = 0U; i < 16U; i++) {
+		ret = i2c_reg_read_byte_dt(&tca, TCA_REG_KEY_EVENT_A, &event);
+		if (ret < 0) {
+			return ret;
+		}
+		if (event == 0U) {
+			break;
+		}
+	}
+	ret = reg_write(&tca, TCA_REG_INT_STAT, 0x01);
+	if (ret < 0) {
+		return ret;
+	}
+
+	int64_t deadline = k_uptime_get() + timeout_s * MSEC_PER_SEC;
+	shell_print(sh, "Press and release the physical 83_OFN button (TCA8418 raw=1)");
+	while (k_uptime_get() < deadline) {
+		ret = tca_read_event(&event);
+		if (ret < 0) {
+			return ret;
+		}
+		ret = reg_write(&tca, TCA_REG_INT_STAT, 0x01);
+		if (ret < 0) {
+			return ret;
+		}
+		if ((event & 0x7fU) == TCA_OFN_BUTTON_CODE) {
+			if ((event & 0x80U) != 0U) {
+				pressed = true;
+				shell_print(sh, "OFN button raw=1 down");
+			} else if (pressed) {
+				shell_print(sh, "OFN button raw=1 up");
+				shell_print(sh, "OFN click PASS (TCA8418 raw=1 press/release)");
+				return 0;
+			}
+		}
+		k_msleep(5);
+	}
+	shell_error(sh, "OFN click timed out (%s)", pressed ? "missing release" : "missing press");
 	return -ETIMEDOUT;
 }
 
@@ -512,32 +580,22 @@ static int cmd_ofn_motion(const struct shell *sh, size_t argc, char **argv)
 	}
 	shell_print(sh, "Move the 83_OFN in all four directions");
 	while (k_uptime_get() < deadline && !(x_pos && x_neg && y_pos && y_neg)) {
-		uint8_t motion, click;
-		int ret = i2c_reg_read_byte_dt(&ofn, OFN_REG_MOTION, &motion);
-		ret |= i2c_reg_read_byte_dt(&ofn, OFN_REG_CLICK, &click);
+		struct ofn_sample sample;
+		int ret = ofn_read_sample(&sample);
 		if (ret < 0) {
 			errors++;
 			k_msleep(8);
 			continue;
 		}
-		clicks += (click & OFN_CLICK_BITS) != 0U;
-		if (motion & OFN_MOTION_BIT) {
-			uint8_t raw_x, raw_y;
-			ret = i2c_reg_read_byte_dt(&ofn, OFN_REG_DELTA_Y, &raw_y);
-			ret |= i2c_reg_read_byte_dt(&ofn, OFN_REG_DELTA_X, &raw_x);
-			if (ret < 0) {
-				errors++;
-			} else {
-				int8_t dx = (int8_t)raw_x;
-				int8_t dy = (int8_t)raw_y;
-				x_pos |= dx > 0;
-				x_neg |= dx < 0;
-				y_pos |= dy > 0;
-				y_neg |= dy < 0;
-				events++;
-				shell_print(sh, "OFN dx=%d dy=%d click=0x%02x int=%d", dx, dy, click,
-					    gpio_pin_get_dt(&ofn_int));
-			}
+		clicks += (sample.click & OFN_CLICK_BITS) != 0U;
+		if ((sample.motion & OFN_MOTION_BIT) != 0U) {
+			x_pos |= sample.dx > 0;
+			x_neg |= sample.dx < 0;
+			y_pos |= sample.dy > 0;
+			y_neg |= sample.dy < 0;
+			events++;
+			shell_print(sh, "OFN dx=%d dy=%d click=0x%02x int=%d", sample.dx,
+				    sample.dy, sample.click, gpio_pin_get_dt(&ofn_int));
 		}
 		k_msleep(8);
 	}
@@ -597,7 +655,8 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	sub_ofn_cmds, SHELL_CMD(id, NULL, "Verify OFN83 product ID", cmd_ofn_id),
 	SHELL_CMD_ARG(motion, NULL, "Check OFN83 motion [seconds]", cmd_ofn_motion, 1, 1),
-	SHELL_CMD_ARG(click, NULL, "Check physical 83_OFN click [seconds]", cmd_ofn_click, 1, 1),
+	SHELL_CMD_ARG(click, NULL, "Check physical 83_OFN button press/release [seconds]",
+		      cmd_ofn_click, 1, 1),
 	SHELL_SUBCMD_SET_END);
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
