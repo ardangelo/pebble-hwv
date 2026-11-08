@@ -627,8 +627,8 @@ int cyberdeck_init(void)
 		return -ENODEV;
 	}
 
-	int ret = gpio_pin_configure_dt(&peripheral_power, GPIO_OUTPUT_ACTIVE);
-	ret |= gpio_pin_configure_dt(&lcd_select, GPIO_OUTPUT_INACTIVE);
+	int ret = gpio_pin_configure_dt(&peripheral_power, GPIO_OUTPUT_ACTIVE | GPIO_INPUT);
+	ret |= gpio_pin_configure_dt(&lcd_select, GPIO_OUTPUT_INACTIVE | GPIO_INPUT);
 	ret |= gpio_pin_configure_dt(&ec_key, GPIO_INPUT);
 	ret |= gpio_pin_configure_dt(&tca_int, GPIO_INPUT);
 	ret |= gpio_pin_configure_dt(&ofn_int, GPIO_INPUT);
