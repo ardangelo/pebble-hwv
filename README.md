@@ -174,15 +174,27 @@ Drawing while blanked updates the saved framebuffer; `on` restores it. Use
 | --- | --- |
 | `hwv mic capture [$SECS]` | Both boards: capture one second (default/max), at 16 kHz, mono signed 16-bit; Asterix PDM uses disposable flash and Cyberdeck DA7212 MIC1_P uses bounded RAM. Both emit `S`, one decimal sample per line, `E`; Cyberdeck also reports RMS/DC/clipping diagnostics before the stream. |
 
-Install `pyserial` on the host. For either board, apply a test tone at the
+Install `pyserial` on the host. Close miniterm or any other console reader
+before running the capture script. For either board, apply a test tone at the
 microphone and capture a WAV from the console port:
 
 ```shell
 python scripts/wavgen.py -p /dev/$PORT -o test.wav -s 1
 ```
 
-`wavgen.py` requires exactly 16,000 samples and fails on timeout, truncated
-output, bad samples or a reported HWV error; it does not create a partial WAV.
+`wavgen.py` ignores the command echo and diagnostics such as
+`DA7212 mic PLL status: 0x07` before `S`. It requires exactly 16,000 samples
+between `S` and `E` and fails on timeout, truncated output, bad samples or a
+reported HWV error; it does not create a partial WAV. After rejecting a sample,
+it discards the remaining stream through `E` before releasing the port, within
+the original 120-second capture deadline.
+
+If an older script fails at `int(line)` on a diagnostic, update the host script;
+that parser failure does not require reflashing the board. The board continues
+transmitting after the script exits, so numbers printed when reattaching are
+the remaining PCM samples. Let them finish through `E` and the shell prompt
+before issuing another command.
+
 Check the WAV is one second at 16 kHz and listen for the applied tone. The
 Cyberdeck path preserves its MIC1/codec-master 16-kHz clocks and fixed 4-MHz
 MCK. Its RAM bound is one second; Asterix checks flash capacity before erasure.

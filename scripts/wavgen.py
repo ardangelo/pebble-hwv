@@ -24,6 +24,7 @@ def main(port, output, seconds):
         deadline = time.monotonic() + CAPTURE_DEADLINE
         started = False
         count = 0
+        stream_error = None
         while time.monotonic() < deadline:
             data = ser.readline()
             if not data:
@@ -31,28 +32,42 @@ def main(port, output, seconds):
             try:
                 line = data.decode("ascii").strip()
             except UnicodeDecodeError as exc:
-                raise RuntimeError("non-ASCII microphone stream") from exc
+                if not started:
+                    raise RuntimeError("non-ASCII microphone stream") from exc
+                if stream_error is None:
+                    stream_error = RuntimeError("non-ASCII microphone stream")
+                continue
             if line == "S" and not started:
                 started = True
                 continue
             if line == "E" and started:
+                if stream_error is not None:
+                    raise stream_error
                 if count != total:
                     raise RuntimeError(f"incomplete capture: {count}/{total} samples")
                 break
             if line.startswith(("Error:", "error:", "Microphone capture failed")):
-                raise RuntimeError(f"HWV capture failed: {line}")
+                raise stream_error or RuntimeError(f"HWV capture failed: {line}")
             if not started:
                 continue  # Echo, prompt, and capture diagnostics precede S.
+            if stream_error is not None:
+                continue  # Drain through E before releasing the console.
             if count >= total:
-                raise RuntimeError("microphone stream exceeds requested duration")
+                stream_error = RuntimeError("microphone stream exceeds requested duration")
+                continue
             try:
                 value = int(line, 10)
                 struct.pack_into("<h", samples, count * 2, value)
             except (ValueError, struct.error) as exc:
-                raise RuntimeError(f"invalid 16-bit microphone sample: {line!r}") from exc
+                stream_error = RuntimeError(f"invalid 16-bit microphone sample: {line!r}")
+                stream_error.__cause__ = exc
+                continue
             count += 1
         else:
-            raise TimeoutError(f"microphone stream timed out after {CAPTURE_DEADLINE}s")
+            detail = f"; discarding rejected stream: {stream_error}" if stream_error else ""
+            raise TimeoutError(
+                f"microphone stream timed out after {CAPTURE_DEADLINE}s{detail}"
+            ) from stream_error
 
     with wave.open(output, "wb") as wav:
         wav.setnchannels(1)
