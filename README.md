@@ -128,6 +128,11 @@ the battery to `VBAT`, `GND`, `NTC` and +5 V to `VBUS` for charger testing.
 | `hwv display border` | Draw a border/addressing pattern |
 | `hwv display brightness $VAL` | Adjust display backlight brightness, `$VAL: 0-100` |
 
+On Cyberdeck, `off` clears the LCD and disables its backlight without switching
+off the shared peripheral rail. EXTCOMIN keeps running while the LCD is powered.
+Drawing while blanked updates the saved framebuffer; `on` restores it. Use
+`hwv cyberdeck power off` only when the shared peripherals should lose power.
+
 ### Flash
 
 | Command | Description |

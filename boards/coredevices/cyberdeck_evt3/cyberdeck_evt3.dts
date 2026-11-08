@@ -212,7 +212,6 @@
 	ls013b7dh01: display@0 {
 		compatible = "sharp,ls013b7dh01";
 		reg = <0>;
-		disp-gpios = <&gpio1 10 GPIO_ACTIVE_HIGH>;
 		pwms = <&sw_pwm 0 PWM_HZ(120) PWM_POLARITY_NORMAL>;
 		pwm-names = "extcomin";
 		spi-max-frequency = <1000000>;

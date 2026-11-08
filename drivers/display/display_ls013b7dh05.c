@@ -31,23 +31,56 @@ struct ls013b7dh05_config {
 	uint8_t *tx;
 	uint32_t tx_size;
 	uint32_t fb_size;
-	bool initially_on;
 };
+
+struct ls013b7dh05_data {
+	bool blanked;
+};
+
+static int ls013b7dh05_clear(const struct ls013b7dh05_config *config)
+{
+	uint8_t clear[2] = {LS013B7DH05_CLEAR, 0U};
+	struct spi_buf buf = {.buf = clear, .len = sizeof(clear)};
+	struct spi_buf_set bufs = {.buffers = &buf, .count = 1U};
+
+	return spi_write_dt(&config->spi, &bufs);
+}
+
+static int ls013b7dh05_write_frame(const struct ls013b7dh05_config *config)
+{
+	int ret = ls013b7dh05_clear(config);
+	if (ret < 0) {
+		return ret;
+	}
+	k_busy_wait(4U);
+
+	config->tx[0] = LS013B7DH05_WRITE;
+	config->tx[1] = 1U;
+	struct spi_buf buf = {.buf = config->tx, .len = config->tx_size};
+	struct spi_buf_set bufs = {.buffers = &buf, .count = 1U};
+
+	return spi_write_dt(&config->spi, &bufs);
+}
 
 static int ls013b7dh05_blanking_on(const struct device *dev)
 {
 	const struct ls013b7dh05_config *config = dev->config;
+	struct ls013b7dh05_data *data = dev->data;
 	int ret;
 
-	ret = gpio_pin_set_dt(&config->disp, 0);
+	if (config->disp.port != NULL) {
+		ret = gpio_pin_set_dt(&config->disp, 0);
+		if (ret == 0) {
+			ret = pwm_set_pulse_dt(&config->extcomin, 0U);
+		}
+	} else {
+		/* With no dedicated DISP pin, blank pixels without switching the shared rail. */
+		ret = ls013b7dh05_clear(config);
+	}
 	if (ret < 0) {
 		return ret;
 	}
-
-	ret = pwm_set_pulse_dt(&config->extcomin, 0U);
-	if (ret < 0) {
-		return ret;
-	}
+	data->blanked = true;
 
 	ret = led_off(config->backlight, 0);
 	if (ret < 0) {
@@ -60,17 +93,21 @@ static int ls013b7dh05_blanking_on(const struct device *dev)
 static int ls013b7dh05_blanking_off(const struct device *dev)
 {
 	const struct ls013b7dh05_config *config = dev->config;
+	struct ls013b7dh05_data *data = dev->data;
 	int ret;
 
-	ret = gpio_pin_set_dt(&config->disp, 1);
+	if (config->disp.port != NULL) {
+		ret = gpio_pin_set_dt(&config->disp, 1);
+		if (ret == 0) {
+			ret = pwm_set_pulse_dt(&config->extcomin, PWM_USEC(100));
+		}
+	} else {
+		ret = ls013b7dh05_write_frame(config);
+	}
 	if (ret < 0) {
 		return ret;
 	}
-
-	ret = pwm_set_pulse_dt(&config->extcomin, PWM_USEC(100));
-	if (ret < 0) {
-		return ret;
-	}
+	data->blanked = false;
 
 	ret = led_on(config->backlight, 0);
 	if (ret < 0) {
@@ -91,9 +128,7 @@ static int ls013b7dh05_write(const struct device *dev, uint16_t x, uint16_t y,
 			     const struct display_buffer_descriptor *desc, const void *buf)
 {
 	const struct ls013b7dh05_config *config = dev->config;
-	struct spi_buf sbuf;
-	struct spi_buf_set sbufs = {.buffers = &sbuf, .count = 1U};
-	int ret;
+	struct ls013b7dh05_data *data = dev->data;
 
 	if (buf != config->fb) {
 		LOG_ERR("Unsupported buffer");
@@ -106,20 +141,10 @@ static int ls013b7dh05_write(const struct device *dev, uint16_t x, uint16_t y,
 		return -EINVAL;
 	}
 
-	uint8_t clear[2] = {LS013B7DH05_CLEAR, 0U};
-	sbuf.buf = clear;
-	sbuf.len = sizeof(clear);
-	ret = spi_write_dt(&config->spi, &sbufs);
-	if (ret < 0) {
-		return ret;
+	if (config->disp.port == NULL && data->blanked) {
+		return 0;
 	}
-	k_busy_wait(4U);
-
-	config->tx[0] = LS013B7DH05_WRITE;
-	config->tx[1] = 1U;
-	sbuf.buf = config->tx;
-	sbuf.len = config->tx_size;
-	return spi_write_dt(&config->spi, &sbufs);
+	return ls013b7dh05_write_frame(config);
 }
 
 static int ls013b7dh05_set_brightness(const struct device *dev, uint8_t brightness)
@@ -169,24 +194,25 @@ static int ls013b7dh05_init(const struct device *dev)
 		return -ENODEV;
 	}
 
-	if (!gpio_is_ready_dt(&config->disp)) {
-		LOG_ERR("DISP GPIO not ready");
-		return -ENODEV;
-	}
-
 	if (!device_is_ready(config->backlight)) {
 		LOG_ERR("Backlight device not ready");
 		return -ENODEV;
 	}
 
-	ret = gpio_pin_configure_dt(&config->disp,
-				    config->initially_on ? GPIO_OUTPUT_ACTIVE : GPIO_OUTPUT_INACTIVE);
-	if (ret < 0) {
-		LOG_ERR("Failed to configure DISP GPIO");
-		return ret;
+	if (config->disp.port != NULL) {
+		if (!gpio_is_ready_dt(&config->disp)) {
+			LOG_ERR("DISP GPIO not ready");
+			return -ENODEV;
+		}
+		ret = gpio_pin_configure_dt(&config->disp, GPIO_OUTPUT_INACTIVE);
+		if (ret < 0) {
+			LOG_ERR("Failed to configure DISP GPIO");
+			return ret;
+		}
 	}
 
-	ret = pwm_set_pulse_dt(&config->extcomin, 0U);
+	/* A powered memory LCD still needs EXTCOMIN while its pixels are blank. */
+	ret = pwm_set_pulse_dt(&config->extcomin, config->disp.port == NULL ? PWM_USEC(100) : 0U);
 	if (ret < 0) {
 		return ret;
 	}
@@ -200,7 +226,7 @@ static int ls013b7dh05_init(const struct device *dev)
 		config->fb[line * (config->width / 8U + 2U) + config->width / 8U + 1U] = line + 2U;
 	}
 
-	return 0;
+	return config->disp.port == NULL ? ls013b7dh05_clear(config) : 0;
 }
 
 static const struct display_driver_api ls013b7dh05_api = {
@@ -216,15 +242,15 @@ static const struct display_driver_api ls013b7dh05_api = {
 	static uint8_t tx##n[2U + (DT_INST_PROP(n, width) * DT_INST_PROP(n, height)) / 8U +        \
 			     DT_INST_PROP(n, height) * 2U];                                       \
                                                                                                    \
+	static struct ls013b7dh05_data ls013b7dh05_data_##n = {.blanked = true};                  \
 	static const struct ls013b7dh05_config ls013b7dh05_config_##n = {                          \
 		.spi = SPI_DT_SPEC_INST_GET(n,                                                     \
 					    SPI_OP_MODE_MASTER | SPI_WORD_SET(8U) |                \
 						    SPI_TRANSFER_LSB | SPI_CS_ACTIVE_HIGH,          \
 					    7U),                                                         \
-		.disp = GPIO_DT_SPEC_INST_GET(n, disp_gpios),                                      \
+		.disp = GPIO_DT_SPEC_INST_GET_OR(n, disp_gpios, {0}),                              \
 		.extcomin = PWM_DT_SPEC_INST_GET(n),                                               \
 		.backlight = DEVICE_DT_GET(DT_INST_PHANDLE(n, backlight)),                         \
-		.initially_on = DT_INST_PROP_OR(n, initially_on, 0),                                \
 		.width = DT_INST_PROP(n, width),                                                   \
 		.height = DT_INST_PROP(n, height),                                                 \
 		.line_width = DIV_ROUND_UP(DT_INST_PROP(n, width), 8U),                            \
@@ -234,7 +260,7 @@ static const struct display_driver_api ls013b7dh05_api = {
 		.fb_size = ARRAY_SIZE(tx##n) - 2U,                                                  \
 	};                                                                                         \
                                                                                                    \
-	DEVICE_DT_INST_DEFINE(n, &ls013b7dh05_init, NULL, NULL, &ls013b7dh05_config_##n,           \
+	DEVICE_DT_INST_DEFINE(n, &ls013b7dh05_init, NULL, &ls013b7dh05_data_##n, &ls013b7dh05_config_##n, \
 			      POST_KERNEL, CONFIG_DISPLAY_INIT_PRIORITY, &ls013b7dh05_api);
 
 DT_INST_FOREACH_STATUS_OKAY(LS013B7DH05_DEFINE)
